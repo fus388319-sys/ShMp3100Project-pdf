@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { jsPDF } from 'jspdf';
+import JSZip from 'jszip';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import {
   AlertCircle,
@@ -8,83 +11,118 @@ import {
   ArrowRight,
   ArrowUp,
   Award,
+  BookOpen,
   Camera,
-  Check,
   CheckCircle2,
   Code2,
+  CreditCard,
+  Crop,
   Download,
+  Eye,
   FileCheck2,
+  FileCode2,
+  FileImage,
   FilePlus2,
   FileSpreadsheet,
-  FileStack,
   FileText,
-  FolderOpen,
   Hash,
   Image as ImageIcon,
-  ImagePlus,
   Layers,
-  LayoutGrid,
+  ListOrdered,
+  MoreHorizontal,
+  PenTool,
   Plus,
+  Presentation,
+  Receipt,
   RefreshCw,
+  RotateCcw,
   RotateCw,
+  ScanLine,
   Scissors,
+  ShieldCheck,
+  Sliders,
   SlidersHorizontal,
+  Sparkles,
   Stamp,
   Trash2,
+  Upload,
+  Wand2,
   X,
+  Zap,
 } from 'lucide-react';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 // ============================================================================
 // Types & Interfaces
 // ============================================================================
 
-type AppView = 'tools' | 'image-scan' | 'pdf-toolkit' | 'template-press';
+type WorkspaceSection = 'all-tools' | 'image-scan' | 'toolkit' | 'templates';
+type ScanStudioStep = 'scan' | 'edit' | 'finish';
+type ScanCategory = 'Doc' | 'ID' | 'Receipt' | 'Book';
+type EditTab = 'crop' | 'filter' | 'arrange' | 'index' | 'stamp';
+type ScanFilter = 'original' | 'crisp' | 'grayscale' | 'bw';
+type PageSizeOption = 'a4' | 'letter' | 'fit';
+type MarginOption = 'none' | 'compact' | 'standard';
+type WatermarkPlacement = 'diagonal' | 'footer';
+type TemplateKind = 'invoice' | 'brief' | 'certificate';
+
 type PdfToolkitTool =
+  | 'word-to-pdf'
+  | 'ppt-to-pdf'
+  | 'excel-to-pdf'
+  | 'html-to-pdf'
+  | 'txt-to-pdf'
+  | 'pdf-to-word'
+  | 'pdf-to-image'
+  | 'pdf-to-ppt'
+  | 'pdf-to-excel'
+  | 'sign'
+  | 'ocr'
+  | 'protect'
   | 'merge'
   | 'split'
   | 'rotate'
   | 'watermark'
   | 'page-numbers'
   | 'metadata';
-type ScanFilter = 'original' | 'crisp' | 'mono';
-type PageSizeOption = 'a4' | 'letter' | 'fit';
-type OrientationOption = 'portrait' | 'landscape';
-type MarginOption = 'none' | 'compact' | 'standard';
-type WatermarkPlacement = 'diagonal' | 'footer';
-type TemplateKind = 'invoice' | 'certificate' | 'brief' | 'note';
 
-interface WatermarkSettings {
-  enabled: boolean;
-  text: string;
-  opacity: number;
-  placement: WatermarkPlacement;
+interface CropBox {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
 }
 
-interface PageNumberSettings {
-  enabled: boolean;
-  position: 'bottom-right' | 'bottom-center';
-}
-
-interface ExportConfig {
-  filename: string;
-  pageSize: PageSizeOption;
-  orientation: OrientationOption;
-  margin: MarginOption;
-  watermark: WatermarkSettings;
-  pageNumbers: PageNumberSettings;
-}
-
-interface QueuedImageItem {
+interface ScannedPage {
   id: string;
-  fileName: string;
-  mimeType: string;
-  sizeBytes: number;
-  previewUrl: string;
+  rawUrl: string;
+  processedUrl: string;
   width: number;
   height: number;
   rotation: 0 | 90 | 180 | 270;
+  crop: CropBox;
   filter: ScanFilter;
-  source: 'upload' | 'camera';
+  brightness: number;
+  contrast: number;
+  category: ScanCategory;
+  source: 'camera' | 'gallery';
+  label: string;
+}
+
+interface IndexEntry {
+  id: string;
+  pageNumber: number;
+  heading: string;
+  summary: string;
+}
+
+interface DetectedBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  confidence: number;
 }
 
 interface QueuedPdfItem {
@@ -97,37 +135,6 @@ interface QueuedPdfItem {
   author: string;
 }
 
-interface ExportedRecord {
-  id: string;
-  filename: string;
-  url: string;
-  sizeBytes: number;
-  pageCount: number;
-  toolLabel: string;
-  createdAt: string;
-}
-
-interface InvoiceLineItem {
-  id: string;
-  description: string;
-  qty: number;
-  rate: number;
-}
-
-interface TemplateDocumentState {
-  kind: TemplateKind;
-  title: string;
-  subtitle: string;
-  senderName: string;
-  recipientName: string;
-  referenceCode: string;
-  dateText: string;
-  bodyText: string;
-  currency: string;
-  lineItems: InvoiceLineItem[];
-  signatureName: string;
-}
-
 interface GeneratedPdfResult {
   blob: Blob;
   url: string;
@@ -136,13 +143,30 @@ interface GeneratedPdfResult {
   sizeBytes: number;
 }
 
-interface CapturedFrame {
+interface ExportRecord {
   id: string;
-  rawUrl: string;
-  previewUrl: string;
-  width: number;
-  height: number;
-  filter: ScanFilter;
+  filename: string;
+  url: string;
+  sizeBytes: number;
+  pageCount: number;
+  createdAt: string;
+}
+
+interface ConvertedPreviewOutput {
+  title: string;
+  textPreview?: string;
+  images?: { pageNumber: number; url: string }[];
+  downloadUrl: string;
+  downloadName: string;
+  secondaryUrl?: string;
+  secondaryName?: string;
+}
+
+interface InvoiceLineItem {
+  id: string;
+  description: string;
+  qty: number;
+  unitPrice: number;
 }
 
 interface ToastMessage {
@@ -152,7 +176,7 @@ interface ToastMessage {
 }
 
 // ============================================================================
-// Constants & Presets
+// Constants
 // ============================================================================
 
 const ACCEPTED_IMAGE_MIME = new Set([
@@ -164,176 +188,340 @@ const ACCEPTED_IMAGE_MIME = new Set([
   'image/webp',
 ]);
 
-const TEMPLATE_PRESETS: Record<TemplateKind, TemplateDocumentState> = {
-  invoice: {
-    kind: 'invoice',
-    title: 'Studio Services Invoice',
-    subtitle: 'Design, document automation, and production delivery',
-    senderName: 'ShMp3100 Studio',
-    recipientName: 'Northstar Systems Ltd.',
-    referenceCode: 'INV-2026-041',
-    dateText: 'November 16, 2026',
-    bodyText:
-      'Payment due within 14 days via bank transfer. Thank you for working with ShMp3100 Studio.',
-    currency: '$',
-    lineItems: [
-      { id: 'li-1', description: 'Interface Architecture & Layout Design', qty: 1, rate: 850 },
-      { id: 'li-2', description: 'Document Automation & PDF Pipeline', qty: 2, rate: 320 },
-    ],
-    signatureName: 'ShMp3100',
-  },
-  certificate: {
-    kind: 'certificate',
-    title: 'Certificate of Achievement',
-    subtitle: 'ShMp3100 Design & Engineering Studio',
-    senderName: 'ShMp3100 Tool',
-    recipientName: 'Avery Chen',
-    referenceCode: 'CERT-3100-08',
-    dateText: 'November 16, 2026',
-    bodyText:
-      'For demonstrating excellence in modern web interface craft, document engineering, and accessible software design.',
-    currency: '$',
-    lineItems: [],
-    signatureName: 'ShMp3100 Director',
-  },
-  brief: {
-    kind: 'brief',
-    title: 'Project Specification Brief',
-    subtitle: 'Structured Document',
-    senderName: 'ShMp3100 Engineering',
-    recipientName: 'Core Product Team',
-    referenceCode: 'DOC-2026-11',
-    dateText: 'November 16, 2026',
-    bodyText:
-      'Objective: Deliver a browser-native PDF studio supporting image conversion, live camera document scanning, page merging, splitting, rotation, and vector template printing.\n\nDeliverables:\n1. Multi-format image pipeline (JPG, PNG, WEBP, GIF, BMP) with scan contrast presets.\n2. Deterministic PDF manipulation via pdf-lib for merging, splitting, and stamping.\n3. Live sheet preview synchronized with export settings.',
-    currency: '$',
-    lineItems: [],
-    signatureName: 'Prepared by ShMp3100',
-  },
-  note: {
-    kind: 'note',
-    title: 'Plain Text & Notes to PDF',
-    subtitle: 'TXT / Memorandum',
-    senderName: 'ShMp3100',
-    recipientName: 'Archive Copy',
-    referenceCode: 'TXT-002',
-    dateText: 'November 16, 2026',
-    bodyText:
-      'Paste or type any text, notes, or document copy here. Every change updates the live sheet preview and exports directly as a crisp vector PDF stamped with your chosen watermark.',
-    currency: '$',
-    lineItems: [],
-    signatureName: 'ShMp3100',
-  },
-};
-
-const TOOLKIT_ITEMS: {
-  id: PdfToolkitTool;
+const SCAN_CATEGORIES: {
+  id: ScanCategory;
   label: string;
-  description: string;
-  colorClass: string;
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
+  { id: 'Doc', label: 'Doc', icon: FileText },
+  { id: 'ID', label: 'ID', icon: CreditCard },
+  { id: 'Receipt', label: 'Receipt', icon: Receipt },
+  { id: 'Book', label: 'Book', icon: BookOpen },
+];
+
+const EDIT_TABS: {
+  id: EditTab;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  { id: 'crop', label: '1. Auto Crop', icon: Crop },
+  { id: 'filter', label: '2. Scan Filter', icon: Sliders },
+  { id: 'arrange', label: '3. Rotate & Order', icon: RotateCw },
+  { id: 'index', label: '4. Index & Rename', icon: ListOrdered },
+  { id: 'stamp', label: '5. Stamp & Page', icon: Stamp },
+];
+
+interface WorkspaceToolDef {
+  id: PdfToolkitTool;
+  label: string;
+  group: 'Convert to PDF' | 'Convert from PDF' | 'Manage & Edit PDF';
+  description: string;
+  badgeColor: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+const TOOLKIT_ITEMS: WorkspaceToolDef[] = [
+  {
+    id: 'txt-to-pdf',
+    label: 'TXT & Notes to PDF',
+    group: 'Convert to PDF',
+    description: 'Turn text notes into clean vector PDFs',
+    badgeColor: 'bg-blue-600',
+    icon: FileText,
+  },
+  {
+    id: 'word-to-pdf',
+    label: 'Word to PDF',
+    group: 'Convert to PDF',
+    description: 'Convert .docx or prose into clean A4 PDFs',
+    badgeColor: 'bg-violet-600',
+    icon: FileText,
+  },
+  {
+    id: 'ppt-to-pdf',
+    label: 'PPT to PDF',
+    group: 'Convert to PDF',
+    description: 'Convert .pptx decks into 16:9 PDF slides',
+    badgeColor: 'bg-rose-600',
+    icon: Presentation,
+  },
+  {
+    id: 'excel-to-pdf',
+    label: 'Excel to PDF',
+    group: 'Convert to PDF',
+    description: 'Convert .xlsx or CSV tables into bordered PDFs',
+    badgeColor: 'bg-emerald-600',
+    icon: FileSpreadsheet,
+  },
+  {
+    id: 'html-to-pdf',
+    label: 'HTML to PDF',
+    group: 'Convert to PDF',
+    description: 'Convert .html markup into structured PDFs',
+    badgeColor: 'bg-amber-600',
+    icon: FileCode2,
+  },
+  {
+    id: 'pdf-to-word',
+    label: 'PDF to Word',
+    group: 'Convert from PDF',
+    description: 'Extract PDF text into editable .doc & .txt',
+    badgeColor: 'bg-blue-600',
+    icon: FileText,
+  },
+  {
+    id: 'pdf-to-image',
+    label: 'PDF to Image',
+    group: 'Convert from PDF',
+    description: 'Render PDF pages to PNG images (.zip pack)',
+    badgeColor: 'bg-purple-600',
+    icon: ImageIcon,
+  },
+  {
+    id: 'pdf-to-ppt',
+    label: 'PDF to PPT',
+    group: 'Convert from PDF',
+    description: 'Export PDF pages as interactive HTML slides',
+    badgeColor: 'bg-orange-600',
+    icon: Presentation,
+  },
+  {
+    id: 'pdf-to-excel',
+    label: 'PDF to Excel',
+    group: 'Convert from PDF',
+    description: 'Extract PDF rows into structured .csv sheets',
+    badgeColor: 'bg-teal-600',
+    icon: FileSpreadsheet,
+  },
   {
     id: 'merge',
     label: 'Merge PDFs',
-    description: 'Combine multiple PDFs in sequence',
-    colorClass: 'bg-[#2563EB]',
+    group: 'Manage & Edit PDF',
+    description: 'Combine multiple PDF documents in order',
+    badgeColor: 'bg-violet-600',
     icon: Layers,
   },
   {
     id: 'split',
     label: 'Split & Extract',
-    description: 'Extract exact page ranges',
-    colorClass: 'bg-[#7C3AED]',
+    group: 'Manage & Edit PDF',
+    description: 'Extract page ranges (e.g. 1-3, 5) to PDF',
+    badgeColor: 'bg-rose-600',
     icon: Scissors,
   },
   {
     id: 'rotate',
     label: 'Rotate Pages',
-    description: 'Rotate sheets 90°, 180°, or 270°',
-    colorClass: 'bg-[#EA580C]',
+    group: 'Manage & Edit PDF',
+    description: 'Rotate chosen PDF pages 90°, 180°, or 270°',
+    badgeColor: 'bg-amber-600',
     icon: RotateCw,
+  },
+  {
+    id: 'sign',
+    label: 'Sign PDF',
+    group: 'Manage & Edit PDF',
+    description: 'Draw or type your signature on PDF pages',
+    badgeColor: 'bg-indigo-600',
+    icon: PenTool,
+  },
+  {
+    id: 'ocr',
+    label: 'OCR & Auto-Index',
+    group: 'Manage & Edit PDF',
+    description: 'Analyze PDF pages to detect title & index',
+    badgeColor: 'bg-cyan-600',
+    icon: Wand2,
+  },
+  {
+    id: 'protect',
+    label: 'Protect & Lock',
+    group: 'Manage & Edit PDF',
+    description: 'Add confidentiality stamp & clean metadata',
+    badgeColor: 'bg-emerald-600',
+    icon: ShieldCheck,
   },
   {
     id: 'watermark',
     label: 'Watermark Stamp',
-    description: 'Apply ShMp3100 Tool PDFMR stamp',
-    colorClass: 'bg-[#16A34A]',
+    group: 'Manage & Edit PDF',
+    description: 'Stamp ShMp3100 Tool PDFMR across pages',
+    badgeColor: 'bg-purple-600',
     icon: Stamp,
   },
   {
     id: 'page-numbers',
     label: 'Page Numbers',
-    description: 'Number pages bottom-right or center',
-    colorClass: 'bg-[#0284C7]',
+    group: 'Manage & Edit PDF',
+    description: 'Stamp crisp page numbers on every page',
+    badgeColor: 'bg-sky-600',
     icon: Hash,
   },
   {
     id: 'metadata',
     label: 'Metadata & Clean',
-    description: 'Edit Title, Author & rebuild stream',
-    colorClass: 'bg-[#4F46E5]',
+    group: 'Manage & Edit PDF',
+    description: 'Edit embedded PDF title & author info',
+    badgeColor: 'bg-slate-700',
     icon: SlidersHorizontal,
   },
 ];
 
-const TEMPLATE_ITEMS: { id: TemplateKind; label: string }[] = [
-  { id: 'invoice', label: 'Studio Invoice' },
-  { id: 'certificate', label: 'Certificate' },
-  { id: 'brief', label: 'Brief to PDF' },
-  { id: 'note', label: 'TXT to PDF' },
-];
-
 // ============================================================================
-// Pure Browser PDF Engine (jsPDF + pdf-lib)
+// Computer Vision: Document Boundary Auto-Detection & Auto-Crop
 // ============================================================================
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+function detectDocumentBoundsFromCanvas(
+  canvas: HTMLCanvasElement
+): DetectedBox | null {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w < 40 || h < 40) return null;
+
+  const { data } = ctx.getImageData(0, 0, w, h);
+
+  let bgSum = 0;
+  let bgCount = 0;
+  for (let x = 0; x < w; x += 2) {
+    const topIdx = (2 * w + x) * 4;
+    const botIdx = ((h - 3) * w + x) * 4;
+    bgSum += 0.299 * data[topIdx] + 0.587 * data[topIdx + 1] + 0.114 * data[topIdx + 2];
+    bgSum += 0.299 * data[botIdx] + 0.587 * data[botIdx + 1] + 0.114 * data[botIdx + 2];
+    bgCount += 2;
+  }
+  const bgLum = bgCount > 0 ? bgSum / bgCount : 40;
+
+  let centerSum = 0;
+  let centerCount = 0;
+  const cxStart = Math.floor(w * 0.3);
+  const cxEnd = Math.floor(w * 0.7);
+  const cyStart = Math.floor(h * 0.3);
+  const cyEnd = Math.floor(h * 0.7);
+  for (let y = cyStart; y < cyEnd; y += 3) {
+    for (let x = cxStart; x < cxEnd; x += 3) {
+      const idx = (y * w + x) * 4;
+      centerSum += 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      centerCount++;
+    }
+  }
+  const centerLum = centerCount > 0 ? centerSum / centerCount : 160;
+  const contrastDelta = Math.abs(centerLum - bgLum);
+
+  if (contrastDelta < 18) return null;
+
+  const threshold = bgLum + (centerLum - bgLum) * 0.42;
+  const targetBrighter = centerLum > bgLum;
+
+  let minX = w;
+  let minY = h;
+  let maxX = 0;
+  let maxY = 0;
+  let hitCount = 0;
+
+  const padX = Math.floor(w * 0.04);
+  const padY = Math.floor(h * 0.04);
+
+  for (let y = padY; y < h - padY; y += 2) {
+    for (let x = padX; x < w - padX; x += 2) {
+      const idx = (y * w + x) * 4;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      const isDoc = targetBrighter ? lum >= threshold : lum <= threshold;
+      if (isDoc) {
+        hitCount++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  const boxW = (maxX - minX) / w;
+  const boxH = (maxY - minY) / h;
+  const areaRatio = boxW * boxH;
+
+  if (hitCount < 80 || boxW < 0.22 || boxH < 0.22 || areaRatio > 0.92) {
+    return null;
+  }
+
+  const nx = Math.max(0.02, minX / w - 0.015);
+  const ny = Math.max(0.02, minY / h - 0.015);
+  const nw = Math.min(0.96 - nx, boxW + 0.03);
+  const nh = Math.min(0.96 - ny, boxH + 0.03);
+
+  return {
+    x: nx,
+    y: ny,
+    w: nw,
+    h: nh,
+    confidence: Math.min(1, contrastDelta / 85),
+  };
 }
 
-function normalizePdfFilename(rawName: string, fallback = 'ShMp3100_Document'): string {
-  const trimmed = rawName.trim() || fallback;
-  const sanitized = trimmed.replace(/[<>:"/\\|?*]+/g, '_');
-  return sanitized.toLowerCase().endsWith('.pdf') ? sanitized : `${sanitized}.pdf`;
-}
-
-function readImageDimensions(
-  src: string
-): Promise<{ width: number; height: number; img: HTMLImageElement }> {
+function readImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => {
-      resolve({
-        width: img.naturalWidth || img.width || 1000,
-        height: img.naturalHeight || img.height || 1000,
-        img,
-      });
-    };
-    img.onerror = () => reject(new Error('Unable to decode image file.'));
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Unable to load image.'));
     img.src = src;
   });
 }
 
-async function processImageToDataUrl(
-  src: string,
+async function autoDetectCropBoxFromUrl(src: string): Promise<CropBox> {
+  const img = await readImageElement(src);
+  const sampleW = 180;
+  const sampleH = Math.max(
+    100,
+    Math.round(sampleW * ((img.naturalHeight || 4) / (img.naturalWidth || 3)))
+  );
+
+  const canvas = document.createElement('canvas');
+  canvas.width = sampleW;
+  canvas.height = sampleH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return { top: 0, right: 0, bottom: 0, left: 0 };
+
+  ctx.drawImage(img, 0, 0, sampleW, sampleH);
+  const box = detectDocumentBoundsFromCanvas(canvas);
+  if (!box) return { top: 0, right: 0, bottom: 0, left: 0 };
+
+  return {
+    top: Math.min(0.35, Math.max(0, Number(box.y.toFixed(3)))),
+    left: Math.min(0.35, Math.max(0, Number(box.x.toFixed(3)))),
+    right: Math.min(0.35, Math.max(0, Number((1 - (box.x + box.w)).toFixed(3)))),
+    bottom: Math.min(0.35, Math.max(0, Number((1 - (box.y + box.h)).toFixed(3)))),
+  };
+}
+
+async function renderProcessedPage(
+  rawUrl: string,
+  crop: CropBox,
   rotation: 0 | 90 | 180 | 270,
-  filter: ScanFilter
+  filter: ScanFilter,
+  brightness: number,
+  contrast: number
 ): Promise<{ dataUrl: string; width: number; height: number }> {
-  const { img, width, height } = await readImageDimensions(src);
+  const img = await readImageElement(rawUrl);
+  const natW = img.naturalWidth || img.width || 1200;
+  const natH = img.naturalHeight || img.height || 1600;
+
+  const sx = Math.round(natW * crop.left);
+  const sy = Math.round(natH * crop.top);
+  const sw = Math.max(40, Math.round(natW * (1 - crop.left - crop.right)));
+  const sh = Math.max(40, Math.round(natH * (1 - crop.top - crop.bottom)));
+
   const swap = rotation === 90 || rotation === 270;
-  const outW = swap ? height : width;
-  const outH = swap ? width : height;
+  const outW = swap ? sh : sw;
+  const outH = swap ? sw : sh;
 
   const canvas = document.createElement('canvas');
   canvas.width = outW;
   canvas.height = outH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Canvas 2D context is unavailable.');
-  }
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D context unavailable.');
 
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, outW, outH);
@@ -342,103 +530,246 @@ async function processImageToDataUrl(
   ctx.translate(outW / 2, outH / 2);
   ctx.rotate((rotation * Math.PI) / 180);
 
+  let filterStr = `brightness(${brightness}%) contrast(${contrast}%)`;
   if (filter === 'crisp') {
-    ctx.filter = 'contrast(1.25) brightness(1.06) saturate(1.08)';
-  } else if (filter === 'mono') {
-    ctx.filter = 'grayscale(1) contrast(1.42) brightness(1.08)';
-  } else {
-    ctx.filter = 'none';
+    filterStr = `brightness(${Math.min(155, brightness + 8)}%) contrast(${Math.min(185, contrast + 26)}%) saturate(112%)`;
+  } else if (filter === 'grayscale') {
+    filterStr = `grayscale(100%) brightness(${brightness}%) contrast(${Math.min(180, contrast + 12)}%)`;
+  } else if (filter === 'bw') {
+    filterStr = `grayscale(100%) brightness(${Math.min(155, brightness + 12)}%) contrast(${Math.min(200, contrast + 45)}%)`;
   }
-
-  ctx.drawImage(img, -width / 2, -height / 2, width, height);
+  ctx.filter = filterStr;
+  ctx.drawImage(img, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
   ctx.restore();
 
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-  return { dataUrl, width: outW, height: outH };
+  if (filter === 'bw') {
+    const imgData = ctx.getImageData(0, 0, outW, outH);
+    const px = imgData.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const lum = px[i];
+      const v = lum > 142 ? 255 : lum < 88 ? 16 : lum;
+      px[i] = v;
+      px[i + 1] = v;
+      px[i + 2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  return {
+    dataUrl: canvas.toDataURL('image/jpeg', 0.92),
+    width: outW,
+    height: outH,
+  };
+}
+
+// ============================================================================
+// PDF Utilities, Compiler & Template Generators (jsPDF + pdf-lib + pdfjs-dist)
+// ============================================================================
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function normalizePdfFilename(rawName: string, fallback = 'ShMp3100_Scan'): string {
+  const trimmed = rawName.trim() || fallback;
+  const sanitized = trimmed.replace(/[<>:"/\\|?*]+/g, '_');
+  return sanitized.toLowerCase().endsWith('.pdf') ? sanitized : `${sanitized}.pdf`;
+}
+
+function triggerDownload(url: string, filename: string) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
 function drawJsPdfWatermark(
   doc: jsPDF,
   pageW: number,
   pageH: number,
-  watermark: WatermarkSettings
+  enabled: boolean,
+  text: string,
+  opacity: number,
+  placement: WatermarkPlacement
 ) {
-  if (!watermark.enabled || !watermark.text.trim()) return;
-  const text = watermark.text.trim();
-  const alpha = Math.min(0.75, Math.max(0.05, watermark.opacity));
+  if (!enabled || !text.trim()) return;
+  const stamp = text.trim();
+  const alpha = Math.min(0.75, Math.max(0.05, opacity));
 
   doc.saveGraphicsState();
   // @ts-expect-error jsPDF GState is available at runtime
   const gState = new doc.GState({ opacity: alpha });
   doc.setGState(gState);
-  doc.setTextColor(108, 60, 225);
+  doc.setTextColor(109, 40, 217);
 
-  if (watermark.placement === 'diagonal') {
+  if (placement === 'diagonal') {
     const fontSize = Math.max(18, Math.min(34, pageW * 0.13));
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(fontSize);
-    doc.text(text, pageW / 2, pageH / 2, {
-      align: 'center',
-      angle: 35,
-    });
+    doc.text(stamp, pageW / 2, pageH / 2, { align: 'center', angle: 35 });
   } else {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
-    doc.text(text, 14, pageH - 9);
+    doc.text(stamp, 14, pageH - 9);
   }
   doc.restoreGraphicsState();
 }
 
-function drawJsPdfPageNumber(
-  doc: jsPDF,
-  pageW: number,
-  pageH: number,
-  pageIndex: number,
-  totalPages: number,
-  position: 'bottom-right' | 'bottom-center'
-) {
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  doc.setTextColor(100, 94, 130);
-  const label = `${pageIndex} / ${totalPages}`;
-  if (position === 'bottom-center') {
-    doc.text(label, pageW / 2, pageH - 9, { align: 'center' });
-  } else {
-    doc.text(label, pageW - 14, pageH - 9, { align: 'right' });
-  }
-}
-
-async function buildPdfFromImages(
-  items: QueuedImageItem[],
-  config: ExportConfig
-): Promise<GeneratedPdfResult> {
-  if (items.length === 0) {
-    throw new Error('Add at least one image or camera scan before exporting.');
+async function compileScannedPdf(options: {
+  pages: ScannedPage[];
+  filename: string;
+  documentTitle: string;
+  authorOrIssuer: string;
+  includeIndex: boolean;
+  indexEntries: IndexEntry[];
+  pageSize: PageSizeOption;
+  margin: MarginOption;
+  watermarkEnabled: boolean;
+  watermarkText: string;
+  watermarkOpacity: number;
+  watermarkPlacement: WatermarkPlacement;
+  pageNumbersEnabled: boolean;
+}): Promise<GeneratedPdfResult> {
+  if (options.pages.length === 0) {
+    throw new Error('Choose or scan at least one image page first.');
   }
 
   const marginMm =
-    config.margin === 'none' ? 0 : config.margin === 'compact' ? 8 : 16;
+    options.margin === 'none' ? 0 : options.margin === 'compact' ? 8 : 14;
 
   let doc: jsPDF | null = null;
+  const indexOffset = options.includeIndex ? 1 : 0;
+  const totalPages = options.pages.length + indexOffset;
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const processed = await processImageToDataUrl(
-      item.previewUrl,
-      item.rotation,
-      item.filter
+  if (options.includeIndex) {
+    const indexFormat = options.pageSize === 'letter' ? 'letter' : 'a4';
+    doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: indexFormat,
+      compress: true,
+    });
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+
+    doc.setFillColor(18, 12, 14);
+    doc.rect(0, 0, pw, 36, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(248, 113, 113);
+    doc.text('SHMP3100 PDF MAKER · DOCUMENT INDEX', 18, 14);
+
+    doc.setFontSize(19);
+    doc.setTextColor(255, 255, 255);
+    doc.text(options.documentTitle || 'Scanned Document', 18, 25);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(210, 200, 200);
+    const metaSub = [
+      options.authorOrIssuer ? `Source: ${options.authorOrIssuer}` : '',
+      `Pages: ${options.pages.length}`,
+      new Date().toLocaleDateString(),
+    ]
+      .filter(Boolean)
+      .join('  ·  ');
+    doc.text(metaSub, 18, 32);
+
+    let y = 50;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(30, 30, 35);
+    doc.text('TABLE OF CONTENTS', 18, y);
+    y += 5;
+    doc.setDrawColor(220, 38, 38);
+    doc.setLineWidth(0.5);
+    doc.line(18, y, pw - 18, y);
+    y += 10;
+
+    const entries =
+      options.indexEntries.length > 0
+        ? options.indexEntries
+        : options.pages.map((p, idx) => ({
+            id: p.id,
+            pageNumber: idx + 1,
+            heading: p.label || `Scanned Page ${idx + 1}`,
+            summary: `${p.category} · ${p.filter.toUpperCase()}`,
+          }));
+
+    for (const entry of entries) {
+      if (y > ph - 26) break;
+      const targetPdfPage = entry.pageNumber + 1;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(24, 24, 27);
+      doc.text(`${entry.pageNumber}. ${entry.heading}`, 18, y);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(185, 28, 28);
+      doc.text(`Page ${targetPdfPage}`, pw - 18, y, { align: 'right' });
+
+      if (entry.summary) {
+        y += 5;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(100, 100, 110);
+        const lines = doc.splitTextToSize(entry.summary, pw - 42);
+        doc.text(lines.slice(0, 2), 23, y);
+        y += lines.slice(0, 2).length * 4.5;
+      }
+
+      y += 3;
+      doc.setDrawColor(235, 235, 240);
+      doc.setLineWidth(0.25);
+      doc.line(18, y, pw - 18, y);
+      y += 7;
+    }
+
+    drawJsPdfWatermark(
+      doc,
+      pw,
+      ph,
+      options.watermarkEnabled,
+      options.watermarkText,
+      options.watermarkOpacity,
+      options.watermarkPlacement
+    );
+
+    if (options.pageNumbersEnabled) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(120, 120, 130);
+      doc.text(`1 / ${totalPages}`, pw - 14, ph - 9, { align: 'right' });
+    }
+  }
+
+  for (let i = 0; i < options.pages.length; i++) {
+    const page = options.pages[i];
+    const rendered = await renderProcessedPage(
+      page.rawUrl,
+      page.crop,
+      page.rotation,
+      page.filter,
+      page.brightness,
+      page.contrast
     );
 
     const pxToMm = 25.4 / 96;
-    const imgWmm = processed.width * pxToMm;
+    const imgWmm = rendered.width * pxToMm;
 
     let pageFormat: string | [number, number] =
-      config.pageSize === 'letter' ? 'letter' : 'a4';
-    let orientation: 'portrait' | 'landscape' = config.orientation;
+      options.pageSize === 'letter' ? 'letter' : 'a4';
+    let orientation: 'portrait' | 'landscape' =
+      rendered.width > rendered.height ? 'landscape' : 'portrait';
 
-    if (config.pageSize === 'fit') {
+    if (options.pageSize === 'fit') {
       const targetW = Math.max(60, Math.min(420, imgWmm + marginMm * 2));
-      const targetH = targetW * (processed.height / processed.width) + marginMm * 2;
+      const targetH = targetW * (rendered.height / rendered.width) + marginMm * 2;
       orientation = targetW > targetH ? 'landscape' : 'portrait';
       pageFormat = [targetW, targetH];
     }
@@ -454,50 +785,54 @@ async function buildPdfFromImages(
       doc.addPage(pageFormat, orientation);
     }
 
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
-    const availW = Math.max(10, pageW - marginMm * 2);
-    const availH = Math.max(10, pageH - marginMm * 2);
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+    const availW = Math.max(10, pw - marginMm * 2);
+    const availH = Math.max(10, ph - marginMm * 2);
 
-    const ratio = Math.min(availW / processed.width, availH / processed.height);
-    const renderW = processed.width * ratio;
-    const renderH = processed.height * ratio;
-    const x = (pageW - renderW) / 2;
-    const y = (pageH - renderH) / 2;
+    const ratio = Math.min(availW / rendered.width, availH / rendered.height);
+    const renderW = rendered.width * ratio;
+    const renderH = rendered.height * ratio;
+    const x = (pw - renderW) / 2;
+    const y = (ph - renderH) / 2;
 
-    doc.addImage(processed.dataUrl, 'JPEG', x, y, renderW, renderH, undefined, 'FAST');
-    drawJsPdfWatermark(doc, pageW, pageH, config.watermark);
-    if (config.pageNumbers.enabled) {
-      drawJsPdfPageNumber(
-        doc,
-        pageW,
-        pageH,
-        i + 1,
-        items.length,
-        config.pageNumbers.position
-      );
+    doc.addImage(rendered.dataUrl, 'JPEG', x, y, renderW, renderH, undefined, 'FAST');
+
+    drawJsPdfWatermark(
+      doc,
+      pw,
+      ph,
+      options.watermarkEnabled,
+      options.watermarkText,
+      options.watermarkOpacity,
+      options.watermarkPlacement
+    );
+
+    if (options.pageNumbersEnabled) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(120, 120, 130);
+      doc.text(`${i + 1 + indexOffset} / ${totalPages}`, pw - 14, ph - 9, {
+        align: 'right',
+      });
     }
   }
 
-  if (!doc) {
-    throw new Error('Failed to initialize PDF document.');
-  }
+  if (!doc) throw new Error('Failed to create PDF.');
 
-  const filename = normalizePdfFilename(config.filename, 'ShMp3100_Images');
+  const filename = normalizePdfFilename(options.filename, 'ShMp3100_Scan');
   doc.setProperties({
-    title: filename.replace(/\.pdf$/i, ''),
+    title: options.documentTitle || filename.replace(/\.pdf$/i, ''),
+    author: options.authorOrIssuer || 'ShMp3100',
     creator: 'ShMp3100 Tool PDFMR',
-    author: 'ShMp3100',
   });
 
   const blob = doc.output('blob');
-  const url = URL.createObjectURL(blob);
-
   return {
     blob,
-    url,
+    url: URL.createObjectURL(blob),
     filename,
-    pageCount: items.length,
+    pageCount: totalPages,
     sizeBytes: blob.size,
   };
 }
@@ -513,99 +848,6 @@ async function inspectPdfFile(file: File): Promise<QueuedPdfItem> {
     pageCount: pdfDoc.getPageCount(),
     title: pdfDoc.getTitle() || file.name.replace(/\.pdf$/i, ''),
     author: pdfDoc.getAuthor() || 'Unspecified',
-  };
-}
-
-async function applyPdfLibOverlays(
-  pdfDoc: PDFDocument,
-  watermark: WatermarkSettings,
-  pageNumbers: PageNumberSettings
-) {
-  const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const regularFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const pages = pdfDoc.getPages();
-  const total = pages.length;
-
-  pages.forEach((page, idx) => {
-    const { width, height } = page.getSize();
-
-    if (watermark.enabled && watermark.text.trim()) {
-      const text = watermark.text.trim();
-      const alpha = Math.min(0.75, Math.max(0.05, watermark.opacity));
-      if (watermark.placement === 'diagonal') {
-        const size = Math.max(20, Math.min(44, width * 0.07));
-        const textWidth = font.widthOfTextAtSize(text, size);
-        page.drawText(text, {
-          x: Math.max(24, (width - textWidth * 0.82) / 2),
-          y: height * 0.42,
-          size,
-          font,
-          color: rgb(0.42, 0.24, 0.88),
-          opacity: alpha,
-          rotate: degrees(35),
-        });
-      } else {
-        page.drawText(text, {
-          x: 28,
-          y: 22,
-          size: 9,
-          font,
-          color: rgb(0.42, 0.24, 0.88),
-          opacity: Math.max(0.25, alpha),
-        });
-      }
-    }
-
-    if (pageNumbers.enabled) {
-      const label = `${idx + 1} / ${total}`;
-      const size = 9;
-      const labelWidth = regularFont.widthOfTextAtSize(label, size);
-      const x =
-        pageNumbers.position === 'bottom-center'
-          ? (width - labelWidth) / 2
-          : width - labelWidth - 28;
-      page.drawText(label, {
-        x,
-        y: 22,
-        size,
-        font: regularFont,
-        color: rgb(0.38, 0.35, 0.5),
-      });
-    }
-  });
-}
-
-async function mergePdfFiles(
-  items: QueuedPdfItem[],
-  config: ExportConfig
-): Promise<GeneratedPdfResult> {
-  if (items.length < 2) {
-    throw new Error('Upload at least 2 PDF files to merge.');
-  }
-
-  const merged = await PDFDocument.create();
-  for (const item of items) {
-    const buffer = await item.file.arrayBuffer();
-    const source = await PDFDocument.load(buffer, { ignoreEncryption: true });
-    const copied = await merged.copyPages(source, source.getPageIndices());
-    copied.forEach((p) => merged.addPage(p));
-  }
-
-  await applyPdfLibOverlays(merged, config.watermark, config.pageNumbers);
-  const filename = normalizePdfFilename(config.filename, 'ShMp3100_Merged');
-  merged.setTitle(filename.replace(/\.pdf$/i, ''));
-  merged.setCreator('ShMp3100 Tool PDFMR');
-
-  const outBytes = await merged.save();
-  const blob = new Blob([new Uint8Array(outBytes)], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-
-  return {
-    blob,
-    url,
-    filename,
-    pageCount: merged.getPageCount(),
-    sizeBytes: blob.size,
   };
 }
 
@@ -633,9 +875,7 @@ function parsePageRanges(rangeStr: string, maxPages: number): number[] {
         end > maxPages ||
         start > end
       ) {
-        throw new Error(
-          `Invalid range "${token}". Pages must be between 1 and ${maxPages}.`
-        );
+        throw new Error(`Invalid range "${token}". Must be 1–${maxPages}.`);
       }
       for (let p = start; p <= end; p++) {
         if (!seen.has(p - 1)) {
@@ -646,9 +886,7 @@ function parsePageRanges(rangeStr: string, maxPages: number): number[] {
     } else {
       const pageNum = Number(token);
       if (!Number.isInteger(pageNum) || pageNum < 1 || pageNum > maxPages) {
-        throw new Error(
-          `Invalid page "${token}". Must be between 1 and ${maxPages}.`
-        );
+        throw new Error(`Invalid page "${token}". Must be 1–${maxPages}.`);
       }
       if (!seen.has(pageNum - 1)) {
         seen.add(pageNum - 1);
@@ -656,456 +894,697 @@ function parsePageRanges(rangeStr: string, maxPages: number): number[] {
       }
     }
   }
-
-  if (indices.length === 0) {
-    throw new Error('No valid pages selected.');
-  }
   return indices;
 }
 
-async function splitPdfFile(
-  item: QueuedPdfItem,
-  rangeStr: string,
-  config: ExportConfig
-): Promise<GeneratedPdfResult> {
-  const buffer = await item.file.arrayBuffer();
-  const source = await PDFDocument.load(buffer, { ignoreEncryption: true });
-  const indices = parsePageRanges(rangeStr, source.getPageCount());
-
-  const target = await PDFDocument.create();
-  const copied = await target.copyPages(source, indices);
-  copied.forEach((p) => target.addPage(p));
-
-  await applyPdfLibOverlays(target, config.watermark, config.pageNumbers);
-  const filename = normalizePdfFilename(
-    config.filename,
-    `${item.title}_extracted`
-  );
-  target.setTitle(filename.replace(/\.pdf$/i, ''));
-  target.setCreator('ShMp3100 Tool PDFMR');
-
-  const outBytes = await target.save();
-  const blob = new Blob([new Uint8Array(outBytes)], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-
-  return {
-    blob,
-    url,
-    filename,
-    pageCount: target.getPageCount(),
-    sizeBytes: blob.size,
-  };
-}
-
-async function rotatePdfFile(
-  item: QueuedPdfItem,
-  rotateBy: 90 | 180 | 270,
-  rangeStr: string,
-  config: ExportConfig
-): Promise<GeneratedPdfResult> {
-  const buffer = await item.file.arrayBuffer();
-  const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
-  const pages = doc.getPages();
-  const indices = rangeStr.trim()
-    ? parsePageRanges(rangeStr, pages.length)
-    : pages.map((_, i) => i);
-
-  for (const idx of indices) {
-    const page = pages[idx];
-    const current = page.getRotation().angle;
-    page.setRotation(degrees((current + rotateBy) % 360));
-  }
-
-  await applyPdfLibOverlays(doc, config.watermark, config.pageNumbers);
-  const filename = normalizePdfFilename(config.filename, `${item.title}_rotated`);
-  doc.setCreator('ShMp3100 Tool PDFMR');
-
-  const outBytes = await doc.save();
-  const blob = new Blob([new Uint8Array(outBytes)], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-
-  return {
-    blob,
-    url,
-    filename,
-    pageCount: doc.getPageCount(),
-    sizeBytes: blob.size,
-  };
-}
-
-async function stampPdfFile(
-  item: QueuedPdfItem,
-  config: ExportConfig,
-  customMeta?: { title: string; author: string }
-): Promise<GeneratedPdfResult> {
-  const buffer = await item.file.arrayBuffer();
-  const doc = await PDFDocument.load(buffer, { ignoreEncryption: true });
-
-  await applyPdfLibOverlays(doc, config.watermark, config.pageNumbers);
-
-  if (customMeta) {
-    if (customMeta.title.trim()) doc.setTitle(customMeta.title.trim());
-    if (customMeta.author.trim()) doc.setAuthor(customMeta.author.trim());
-  }
-  doc.setCreator('ShMp3100 Tool PDFMR');
-
-  const outBytes = await doc.save({ useObjectStreams: true });
-  const blob = new Blob([new Uint8Array(outBytes)], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const filename = normalizePdfFilename(config.filename, `${item.title}_stamped`);
-
-  return {
-    blob,
-    url,
-    filename,
-    pageCount: doc.getPageCount(),
-    sizeBytes: blob.size,
-  };
-}
-
-async function buildTemplatePdf(
-  tpl: TemplateDocumentState,
-  config: ExportConfig
-): Promise<GeneratedPdfResult> {
-  const doc = new jsPDF({
-    orientation: tpl.kind === 'certificate' ? 'landscape' : 'portrait',
-    unit: 'mm',
-    format: config.pageSize === 'letter' ? 'letter' : 'a4',
-    compress: true,
-  });
-
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-
-  if (tpl.kind === 'certificate') {
-    doc.setDrawColor(108, 60, 225);
-    doc.setLineWidth(1.2);
-    doc.rect(12, 12, pageW - 24, pageH - 24);
-    doc.setDrawColor(196, 181, 253);
-    doc.setLineWidth(0.4);
-    doc.rect(16, 16, pageW - 32, pageH - 32);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.setTextColor(108, 60, 225);
-    doc.text(
-      tpl.subtitle.toUpperCase() || 'CERTIFICATE OF ACHIEVEMENT',
-      pageW / 2,
-      42,
-      { align: 'center' }
-    );
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(30);
-    doc.setTextColor(30, 27, 75);
-    doc.text(tpl.title || 'Certificate Title', pageW / 2, 62, {
-      align: 'center',
-    });
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    doc.setTextColor(100, 94, 130);
-    doc.text('Presented to', pageW / 2, 82, { align: 'center' });
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(24);
-    doc.setTextColor(30, 27, 75);
-    doc.text(tpl.recipientName || 'Recipient Name', pageW / 2, 98, {
-      align: 'center',
-    });
-
-    doc.setDrawColor(108, 60, 225);
-    doc.setLineWidth(0.6);
-    doc.line(pageW / 2 - 55, 104, pageW / 2 + 55, 104);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.setTextColor(76, 70, 108);
-    const wrapped = doc.splitTextToSize(tpl.bodyText || '', pageW - 80);
-    doc.text(wrapped, pageW / 2, 120, { align: 'center' });
-
-    doc.setFontSize(10);
-    doc.text(tpl.dateText || '', 42, pageH - 34);
-    doc.line(35, pageH - 40, 95, pageH - 40);
-    doc.text(
-      tpl.signatureName || tpl.senderName || 'Authorized Signatory',
-      pageW - 42,
-      pageH - 34,
-      { align: 'right' }
-    );
-    doc.line(pageW - 95, pageH - 40, pageW - 35, pageH - 40);
-  } else if (tpl.kind === 'invoice') {
-    doc.setFillColor(108, 60, 225);
-    doc.rect(0, 0, pageW, 38, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(20);
-    doc.text(tpl.title || 'INVOICE', 18, 21);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(233, 226, 255);
-    doc.text(tpl.referenceCode || 'INV-2026-001', 18, 29);
-
-    doc.text(tpl.senderName || 'ShMp3100 Studio', pageW - 18, 20, {
-      align: 'right',
-    });
-    doc.text(tpl.dateText || '', pageW - 18, 27, { align: 'right' });
-
-    doc.setTextColor(30, 27, 75);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.text('BILL TO', 18, 54);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    doc.text(tpl.recipientName || 'Client Name', 18, 61);
-
-    doc.setFontSize(9.5);
-    doc.setTextColor(100, 94, 130);
-    doc.text(tpl.subtitle || '', 18, 68);
-
-    let y = 84;
-    doc.setFillColor(243, 239, 254);
-    doc.rect(18, y, pageW - 36, 9, 'F');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(76, 29, 149);
-    doc.text('DESCRIPTION', 22, y + 6);
-    doc.text('QTY', pageW - 72, y + 6, { align: 'right' });
-    doc.text('RATE', pageW - 46, y + 6, { align: 'right' });
-    doc.text('AMOUNT', pageW - 22, y + 6, { align: 'right' });
-
-    y += 14;
-    let grandTotal = 0;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-
-    for (const row of tpl.lineItems) {
-      const lineTotal = row.qty * row.rate;
-      grandTotal += lineTotal;
-      doc.setTextColor(30, 27, 75);
-      doc.text(row.description || 'Service Item', 22, y);
-      doc.text(String(row.qty), pageW - 72, y, { align: 'right' });
-      doc.text(`${tpl.currency}${row.rate.toFixed(2)}`, pageW - 46, y, {
-        align: 'right',
-      });
-      doc.text(`${tpl.currency}${lineTotal.toFixed(2)}`, pageW - 22, y, {
-        align: 'right',
-      });
-      doc.setDrawColor(233, 226, 255);
-      doc.line(18, y + 3.5, pageW - 18, y + 3.5);
-      y += 10;
+async function processToolkitPdf(options: {
+  tool: PdfToolkitTool;
+  files: QueuedPdfItem[];
+  filename: string;
+  splitRange: string;
+  rotateDegrees: 90 | 180 | 270;
+  rotateRange: string;
+  metaTitle: string;
+  metaAuthor: string;
+  watermarkEnabled: boolean;
+  watermarkText: string;
+  watermarkOpacity: number;
+  pageNumbersEnabled: boolean;
+}): Promise<GeneratedPdfResult> {
+  let doc: PDFDocument;
+  if (options.tool === 'merge') {
+    if (options.files.length < 2) {
+      throw new Error('Add at least 2 PDF files to merge.');
     }
-
-    y += 6;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(108, 60, 225);
-    doc.text('TOTAL DUE', pageW - 64, y);
-    doc.setTextColor(30, 27, 75);
-    doc.text(`${tpl.currency}${grandTotal.toFixed(2)}`, pageW - 22, y, {
-      align: 'right',
-    });
-
-    if (tpl.bodyText.trim()) {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.5);
-      doc.setTextColor(100, 94, 130);
-      const notes = doc.splitTextToSize(tpl.bodyText, pageW - 36);
-      doc.text(notes, 18, y + 18);
+    doc = await PDFDocument.create();
+    for (const item of options.files) {
+      const buf = await item.file.arrayBuffer();
+      const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+      const copied = await doc.copyPages(src, src.getPageIndices());
+      copied.forEach((p) => doc.addPage(p));
     }
   } else {
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(108, 60, 225);
-    doc.text((tpl.subtitle || 'DOCUMENT BRIEF').toUpperCase(), 20, 24);
+    if (options.files.length === 0) {
+      throw new Error('Select a PDF file first.');
+    }
+    const buf = await options.files[0].file.arrayBuffer();
+    const src = await PDFDocument.load(buf, { ignoreEncryption: true });
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(22);
-    doc.setTextColor(30, 27, 75);
-    doc.text(tpl.title || 'Untitled Document', 20, 35);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(100, 94, 130);
-    const metaLine = [
-      tpl.senderName,
-      tpl.recipientName,
-      tpl.dateText,
-      tpl.referenceCode,
-    ]
-      .filter(Boolean)
-      .join('  ·  ');
-    doc.text(metaLine, 20, 44);
-
-    doc.setDrawColor(229, 221, 251);
-    doc.line(20, 49, pageW - 20, 49);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.setTextColor(30, 27, 75);
-    const bodyLines = doc.splitTextToSize(tpl.bodyText || '', pageW - 40);
-    doc.text(bodyLines, 20, 60);
-
-    if (tpl.signatureName.trim()) {
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      doc.text(tpl.signatureName, 20, pageH - 28);
+    if (options.tool === 'split') {
+      const indices = parsePageRanges(options.splitRange, src.getPageCount());
+      doc = await PDFDocument.create();
+      const copied = await doc.copyPages(src, indices);
+      copied.forEach((p) => doc.addPage(p));
+    } else {
+      doc = src;
+      if (options.tool === 'rotate') {
+        const pages = doc.getPages();
+        const indices = options.rotateRange.trim()
+          ? parsePageRanges(options.rotateRange, pages.length)
+          : pages.map((_, i) => i);
+        for (const idx of indices) {
+          const cur = pages[idx].getRotation().angle;
+          pages[idx].setRotation(degrees((cur + options.rotateDegrees) % 360));
+        }
+      }
     }
   }
 
-  drawJsPdfWatermark(doc, pageW, pageH, config.watermark);
-  if (config.pageNumbers.enabled) {
-    drawJsPdfPageNumber(doc, pageW, pageH, 1, 1, config.pageNumbers.position);
-  }
+  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const regFont = await doc.embedFont(StandardFonts.Helvetica);
+  const pages = doc.getPages();
 
-  const filename = normalizePdfFilename(config.filename, `ShMp3100_${tpl.kind}`);
-  doc.setProperties({
-    title: tpl.title || filename.replace(/\.pdf$/i, ''),
-    creator: 'ShMp3100 Tool PDFMR',
-    author: tpl.senderName || 'ShMp3100',
+  pages.forEach((page, idx) => {
+    const { width, height } = page.getSize();
+    if (
+      (options.watermarkEnabled || options.tool === 'watermark') &&
+      options.watermarkText.trim()
+    ) {
+      const text = options.watermarkText.trim();
+      const size = Math.max(20, Math.min(42, width * 0.068));
+      const tw = boldFont.widthOfTextAtSize(text, size);
+      page.drawText(text, {
+        x: Math.max(24, (width - tw * 0.8) / 2),
+        y: height * 0.42,
+        size,
+        font: boldFont,
+        color: rgb(0.43, 0.16, 0.85),
+        opacity: options.watermarkOpacity,
+        rotate: degrees(35),
+      });
+    }
+    if (options.pageNumbersEnabled || options.tool === 'page-numbers') {
+      const label = `${idx + 1} / ${pages.length}`;
+      const lw = regFont.widthOfTextAtSize(label, 9);
+      page.drawText(label, {
+        x: width - lw - 28,
+        y: 22,
+        size: 9,
+        font: regFont,
+        color: rgb(0.35, 0.35, 0.4),
+      });
+    }
   });
 
-  const blob = doc.output('blob');
+  if (options.tool === 'metadata') {
+    if (options.metaTitle.trim()) doc.setTitle(options.metaTitle.trim());
+    if (options.metaAuthor.trim()) doc.setAuthor(options.metaAuthor.trim());
+  }
+  doc.setCreator('ShMp3100 Tool PDFMR');
+
+  const bytes = await doc.save({ useObjectStreams: true });
+  const blob = new Blob([new Uint8Array(bytes)], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
+  const filename = normalizePdfFilename(options.filename, 'ShMp3100_Toolkit');
 
   return {
     blob,
     url,
     filename,
-    pageCount: 1,
+    pageCount: doc.getPageCount(),
     sizeBytes: blob.size,
   };
 }
 
-function triggerDownload(url: string, filename: string) {
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+// ============================================================================
+// All-in-One Conversion Engines (Word/PPT/Excel/HTML/TXT <-> PDF)
+// ============================================================================
+
+async function extractTextFromDocx(file: File): Promise<string> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const xmlFile = zip.file('word/document.xml');
+  if (!xmlFile) throw new Error('Could not find document content inside .docx file.');
+  const xmlText = await xmlFile.async('text');
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+  const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
+  const lines = paragraphs
+    .map((p) =>
+      Array.from(p.getElementsByTagName('w:t'))
+        .map((n) => n.textContent || '')
+        .join('')
+        .trim()
+    )
+    .filter(Boolean);
+  return lines.join('\n\n') || '(Empty Word document)';
 }
 
-// ============================================================================
-// Brand Emblem SVG
-// ============================================================================
+async function extractSlidesFromPptx(file: File): Promise<string[]> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const slideNames = Object.keys(zip.files)
+    .filter((k) => /^ppt\/slides\/slide\d+\.xml$/i.test(k))
+    .sort((a, b) => {
+      const na = Number(a.match(/slide(\d+)\.xml/i)?.[1] || 0);
+      const nb = Number(b.match(/slide(\d+)\.xml/i)?.[1] || 0);
+      return na - nb;
+    });
+  if (slideNames.length === 0) throw new Error('No slides found inside .pptx file.');
+  const parser = new DOMParser();
+  const slides: string[] = [];
+  for (const name of slideNames) {
+    const xml = await zip.file(name)!.async('text');
+    const doc = parser.parseFromString(xml, 'application/xml');
+    const texts = Array.from(doc.getElementsByTagName('a:t'))
+      .map((n) => n.textContent?.trim() || '')
+      .filter(Boolean);
+    slides.push(texts.join('\n') || 'Slide');
+  }
+  return slides;
+}
 
-function ShMpBrandLogo({ size = 34 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 100 100"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-      className="shrink-0"
-    >
-      <defs>
-        <linearGradient id="shmp-cloud" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#38BDF8" />
-          <stop offset="55%" stopColor="#6C3CE1" />
-          <stop offset="100%" stopColor="#9333EA" />
-        </linearGradient>
-        <linearGradient id="shmp-laptop" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#2563EB" />
-          <stop offset="100%" stopColor="#1E3A8A" />
-        </linearGradient>
-        <linearGradient id="shmp-shield" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#10B981" />
-          <stop offset="100%" stopColor="#059669" />
-        </linearGradient>
-      </defs>
-      <circle cx="50" cy="50" r="48" fill="#131826" />
-      <path
-        d="M27 43 C27 32, 36 25, 45 25 C48 16, 61 16, 67 25 C76 25, 80 34, 76 43 C80 49, 76 55, 69 55 L31 55 C24 55, 21 49, 27 43Z"
-        fill="url(#shmp-cloud)"
-      />
-      <circle cx="42" cy="34" r="2" fill="white" opacity="0.85" />
-      <circle cx="56" cy="30" r="1.5" fill="white" opacity="0.7" />
-      <rect x="22" y="57" width="56" height="27" rx="3.5" fill="url(#shmp-laptop)" />
-      <rect x="26" y="60" width="48" height="20" rx="2" fill="#0F172A" />
-      <circle cx="42" cy="70" r="6.5" fill="#38BDF8" />
-      <circle cx="42" cy="70" r="3" fill="#0F172A" />
-      <path
-        d="M60 63 L70 63 L70 72 C70 76, 65 79, 65 79 C65 79, 60 76, 60 72Z"
-        fill="url(#shmp-shield)"
-      />
-      <path
-        d="M63 70 L65 72 L68 68"
-        fill="none"
-        stroke="white"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <rect x="17" y="84" width="66" height="4" rx="2" fill="#1E40AF" />
-    </svg>
+function parseCsvRows(raw: string): string[][] {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.map((line) => {
+    const sep = line.includes('\t') ? '\t' : ',';
+    const cells: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') inQuotes = !inQuotes;
+      else if (ch === sep && !inQuotes) {
+        cells.push(current.trim());
+        current = '';
+      } else current += ch;
+    }
+    cells.push(current.trim());
+    return cells;
+  });
+}
+
+async function extractRowsFromXlsx(file: File): Promise<string[][]> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const parser = new DOMParser();
+  const sharedStrings: string[] = [];
+  const ssFile = zip.file('xl/sharedStrings.xml');
+  if (ssFile) {
+    const ssXml = parser.parseFromString(await ssFile.async('text'), 'application/xml');
+    Array.from(ssXml.getElementsByTagName('si')).forEach((si) => {
+      const txt = Array.from(si.getElementsByTagName('t'))
+        .map((t) => t.textContent || '')
+        .join('');
+      sharedStrings.push(txt);
+    });
+  }
+  const sheetName = Object.keys(zip.files).find((k) =>
+    /^xl\/worksheets\/sheet1\.xml$/i.test(k)
   );
+  if (!sheetName) throw new Error('Could not find worksheet inside .xlsx file.');
+  const sheetDoc = parser.parseFromString(
+    await zip.file(sheetName)!.async('text'),
+    'application/xml'
+  );
+  const rows: string[][] = [];
+  Array.from(sheetDoc.getElementsByTagName('row')).forEach((rowEl) => {
+    const rowCells: string[] = [];
+    Array.from(rowEl.getElementsByTagName('c')).forEach((cellEl) => {
+      const type = cellEl.getAttribute('t');
+      const v = cellEl.getElementsByTagName('v')[0]?.textContent || '';
+      if (type === 's') rowCells.push(sharedStrings[Number(v)] || '');
+      else {
+        const inlineT = cellEl.getElementsByTagName('t')[0]?.textContent;
+        rowCells.push(inlineT ?? v);
+      }
+    });
+    if (rowCells.some(Boolean)) rows.push(rowCells);
+  });
+  return rows;
+}
+
+function extractReadableHtmlLines(htmlRaw: string): { title: string; blocks: string[] } {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlRaw, 'text/html');
+  doc.querySelectorAll('script,style,noscript').forEach((n) => n.remove());
+  const title = doc.title?.trim() || doc.querySelector('h1')?.textContent?.trim() || 'HTML Document';
+  const blocks: string[] = [];
+  doc.body.querySelectorAll('h1,h2,h3,h4,p,li,blockquote,pre').forEach((el) => {
+    const t = el.textContent?.replace(/\s+/g, ' ').trim();
+    if (t) blocks.push(t);
+  });
+  if (blocks.length === 0 && doc.body.textContent?.trim()) {
+    blocks.push(doc.body.textContent.replace(/\s+/g, ' ').trim());
+  }
+  return { title, blocks };
+}
+
+async function convertSourceToPdf(options: {
+  tool: PdfToolkitTool;
+  textInput: string;
+  sourceFile: File | null;
+  filename: string;
+  watermarkEnabled: boolean;
+  watermarkText: string;
+  watermarkOpacity: number;
+}): Promise<GeneratedPdfResult> {
+  const { tool, textInput, sourceFile } = options;
+
+  if (tool === 'ppt-to-pdf') {
+    let slides: string[] = [];
+    if (sourceFile && sourceFile.name.toLowerCase().endsWith('.pptx')) {
+      slides = await extractSlidesFromPptx(sourceFile);
+    } else {
+      const raw = sourceFile ? await sourceFile.text() : textInput;
+      slides = raw
+        .split(/\n---+\n|\r?\n\r?\n\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    if (slides.length === 0) {
+      throw new Error('Upload a .pptx file or enter slide text (separate slides with ---).');
+    }
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: [254, 142.9] });
+    slides.forEach((slideText, idx) => {
+      if (idx > 0) doc.addPage([254, 142.9], 'landscape');
+      const pw = doc.internal.pageSize.getWidth();
+      const ph = doc.internal.pageSize.getHeight();
+      doc.setFillColor(24, 18, 43);
+      doc.rect(0, 0, pw, ph, 'F');
+      doc.setFillColor(109, 40, 217);
+      doc.rect(0, 0, pw, 3.5, 'F');
+
+      const lines = slideText.split(/\r?\n/).filter(Boolean);
+      const heading = lines[0] || `Slide ${idx + 1}`;
+      const body = lines.slice(1).join('\n');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(22);
+      doc.setTextColor(255, 255, 255);
+      const hLines = doc.splitTextToSize(heading, pw - 36);
+      doc.text(hLines.slice(0, 2), 18, 28);
+
+      if (body) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(13);
+        doc.setTextColor(225, 220, 240);
+        const bLines = doc.splitTextToSize(body, pw - 36);
+        doc.text(bLines.slice(0, 11), 18, 52);
+      }
+
+      doc.setFontSize(9);
+      doc.setTextColor(180, 175, 210);
+      doc.text(`ShMp3100 Tool PDFMR · Slide ${idx + 1} / ${slides.length}`, pw - 18, ph - 10, {
+        align: 'right',
+      });
+    });
+
+    const outName = normalizePdfFilename(
+      options.filename || sourceFile?.name.replace(/\.[^.]+$/, '') || 'Presentation',
+      'ShMp3100_Slides'
+    );
+    const blob = doc.output('blob');
+    return {
+      blob,
+      url: URL.createObjectURL(blob),
+      filename: outName,
+      pageCount: slides.length,
+      sizeBytes: blob.size,
+    };
+  }
+
+  if (tool === 'excel-to-pdf') {
+    let rows: string[][] = [];
+    if (sourceFile && sourceFile.name.toLowerCase().endsWith('.xlsx')) {
+      rows = await extractRowsFromXlsx(sourceFile);
+    } else {
+      const raw = sourceFile ? await sourceFile.text() : textInput;
+      rows = parseCsvRows(raw);
+    }
+    if (rows.length === 0) {
+      throw new Error('Upload a .xlsx / .csv file or paste comma-separated rows.');
+    }
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+    const cols = Math.max(...rows.map((r) => r.length));
+    const colW = Math.max(22, (pw - 28) / Math.max(1, Math.min(cols, 8)));
+
+    let y = 24;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(24, 24, 36);
+    doc.text(sourceFile?.name || 'Spreadsheet Export', 14, 15);
+
+    rows.forEach((row, rIdx) => {
+      if (y > ph - 18) {
+        doc.addPage('a4', 'landscape');
+        y = 18;
+      }
+      const isHeader = rIdx === 0;
+      if (isHeader) {
+        doc.setFillColor(109, 40, 217);
+        doc.rect(14, y - 5, pw - 28, 8, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+      } else {
+        if (rIdx % 2 === 0) {
+          doc.setFillColor(245, 243, 255);
+          doc.rect(14, y - 5, pw - 28, 7.5, 'F');
+        }
+        doc.setTextColor(35, 35, 45);
+        doc.setFont('helvetica', 'normal');
+      }
+      doc.setFontSize(8.5);
+      row.slice(0, 8).forEach((cell, cIdx) => {
+        const clipped = cell.length > 26 ? `${cell.slice(0, 24)}..` : cell;
+        doc.text(clipped, 16 + cIdx * colW, y);
+      });
+      y += 8;
+    });
+
+    const outName = normalizePdfFilename(
+      options.filename || sourceFile?.name.replace(/\.[^.]+$/, '') || 'Spreadsheet',
+      'ShMp3100_Sheet'
+    );
+    const blob = doc.output('blob');
+    return {
+      blob,
+      url: URL.createObjectURL(blob),
+      filename: outName,
+      pageCount: doc.getNumberOfPages(),
+      sizeBytes: blob.size,
+    };
+  }
+
+  let title = sourceFile?.name.replace(/\.[^.]+$/, '') || 'Converted Document';
+  let paragraphs: string[] = [];
+
+  if (tool === 'word-to-pdf') {
+    if (sourceFile && sourceFile.name.toLowerCase().endsWith('.docx')) {
+      const txt = await extractTextFromDocx(sourceFile);
+      paragraphs = txt.split(/\n{2,}/);
+    } else {
+      const raw = sourceFile ? await sourceFile.text() : textInput;
+      paragraphs = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    }
+  } else if (tool === 'html-to-pdf') {
+    const raw = sourceFile ? await sourceFile.text() : textInput;
+    const parsed = extractReadableHtmlLines(raw);
+    title = parsed.title;
+    paragraphs = parsed.blocks;
+  } else {
+    const raw = sourceFile ? await sourceFile.text() : textInput;
+    paragraphs = raw.split(/\r?\n/);
+  }
+
+  const cleanText = paragraphs.join('\n').trim();
+  if (!cleanText) {
+    throw new Error('Upload a document file or enter text content to convert to PDF.');
+  }
+
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+
+  doc.setFillColor(109, 40, 217);
+  doc.rect(0, 0, pw, 26, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(255, 255, 255);
+  doc.text(title.slice(0, 62), 16, 16);
+
+  doc.setFont(tool === 'txt-to-pdf' ? 'courier' : 'helvetica', 'normal');
+  doc.setFontSize(10.5);
+  doc.setTextColor(25, 25, 32);
+
+  let y = 38;
+  for (const para of paragraphs) {
+    if (!para.trim()) {
+      y += 4;
+      continue;
+    }
+    const wrapped = doc.splitTextToSize(para, pw - 32);
+    for (const line of wrapped) {
+      if (y > ph - 20) {
+        doc.addPage('a4', 'portrait');
+        y = 20;
+      }
+      doc.text(line, 16, y);
+      y += 5.4;
+    }
+    y += 2.5;
+  }
+
+  const totalP = doc.getNumberOfPages();
+  for (let i = 1; i <= totalP; i++) {
+    doc.setPage(i);
+    drawJsPdfWatermark(
+      doc,
+      pw,
+      ph,
+      options.watermarkEnabled,
+      options.watermarkText,
+      options.watermarkOpacity,
+      'footer'
+    );
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(130, 130, 140);
+    doc.text(`${i} / ${totalP}`, pw - 16, ph - 9, { align: 'right' });
+  }
+
+  const outName = normalizePdfFilename(options.filename || title, 'ShMp3100_Document');
+  const blob = doc.output('blob');
+  return {
+    blob,
+    url: URL.createObjectURL(blob),
+    filename: outName,
+    pageCount: totalP,
+    sizeBytes: blob.size,
+  };
+}
+
+async function convertPdfToTarget(
+  tool: PdfToolkitTool,
+  file: File
+): Promise<ConvertedPreviewOutput> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const baseName = file.name.replace(/\.pdf$/i, '') || 'Document';
+
+  if (tool === 'pdf-to-image' || tool === 'pdf-to-ppt') {
+    const renderedImages: { pageNumber: number; url: string; text: string }[] = [];
+    const zip = new JSZip();
+
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const viewport = page.getViewport({ scale: 1.8 });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) continue;
+
+      await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+      const dataUrl = canvas.toDataURL('image/png');
+      const base64 = dataUrl.split(',')[1] || '';
+      zip.file(`${baseName}_page_${p}.png`, base64, { base64: true });
+
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((it) => ('str' in it ? it.str : ''))
+        .join(' ')
+        .trim();
+
+      renderedImages.push({ pageNumber: p, url: dataUrl, text: pageText });
+    }
+
+    if (tool === 'pdf-to-image') {
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      return {
+        title: `Rendered ${renderedImages.length} PNG page(s) from ${file.name}`,
+        images: renderedImages.map((r) => ({ pageNumber: r.pageNumber, url: r.url })),
+        downloadUrl: URL.createObjectURL(zipBlob),
+        downloadName: `${baseName}_images.zip`,
+      };
+    }
+
+    const slidesHtml = `<!doctype html><html><head><meta charset="utf-8"><title>${baseName} Slides</title><style>body{margin:0;font-family:system-ui,sans-serif;background:#1e1b4b;color:#fff;padding:32px}h1{font-size:20px;margin-bottom:24px}.slide{background:#fff;color:#111;border-radius:16px;padding:20px;margin:0 auto 24px;max-width:900px}.slide img{width:100%;border-radius:8px}.note{margin-top:12px;font-size:13px;color:#475569;line-height:1.5}</style></head><body><h1>${baseName} — ShMp3100 Slide Deck (${renderedImages.length} slides)</h1>${renderedImages
+      .map(
+        (s) =>
+          `<section class="slide"><div>Slide ${s.pageNumber}</div><img src="${s.url}" alt="Slide ${s.pageNumber}" /><p class="note">${s.text.replace(/</g, '&lt;')}</p></section>`
+      )
+      .join('')}</body></html>`;
+
+    const deckBlob = new Blob([slidesHtml], { type: 'text/html' });
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    return {
+      title: `Created ${renderedImages.length}-slide deck from ${file.name}`,
+      images: renderedImages.map((r) => ({ pageNumber: r.pageNumber, url: r.url })),
+      downloadUrl: URL.createObjectURL(deckBlob),
+      downloadName: `${baseName}_slides.html`,
+      secondaryUrl: URL.createObjectURL(zipBlob),
+      secondaryName: `${baseName}_slide_images.zip`,
+    };
+  }
+
+  const pageTexts: string[] = [];
+  const csvRows: string[][] = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    const rowMap = new Map<number, { x: number; str: string }[]>();
+    for (const item of tc.items) {
+      if (!('str' in item) || !item.str.trim()) continue;
+      const tr = item.transform;
+      const yBucket = Math.round((tr?.[5] || 0) / 5) * 5;
+      const xPos = tr?.[4] || 0;
+      const list = rowMap.get(yBucket) || [];
+      list.push({ x: xPos, str: item.str });
+      rowMap.set(yBucket, list);
+    }
+
+    const sortedYs = Array.from(rowMap.keys()).sort((a, b) => b - a);
+    const lines: string[] = [];
+    for (const yKey of sortedYs) {
+      const cells = (rowMap.get(yKey) || []).sort((a, b) => a.x - b.x);
+      lines.push(cells.map((c) => c.str).join(' '));
+      csvRows.push(cells.map((c) => c.str.replace(/"/g, '""')));
+    }
+    pageTexts.push(`--- Page ${p} ---\n${lines.join('\n')}`);
+  }
+
+  const fullText =
+    pageTexts.join('\n\n') ||
+    '(No selectable text found; use OCR & Auto-Index for scanned pages.)';
+
+  if (tool === 'pdf-to-excel') {
+    const csvContent = csvRows.map((r) => r.map((c) => `"${c}"`).join(',')).join('\n');
+    const csvBlob = new Blob(
+      [csvContent || `"Extracted Text"\n"${fullText.replace(/"/g, '""')}"`],
+      { type: 'text/csv;charset=utf-8' }
+    );
+    return {
+      title: `Extracted ${csvRows.length} rows into CSV from ${file.name}`,
+      textPreview: csvContent.slice(0, 3000),
+      downloadUrl: URL.createObjectURL(csvBlob),
+      downloadName: `${baseName}_table.csv`,
+    };
+  }
+
+  const docHtml = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>${baseName}</title></head><body><h1>${baseName}</h1><pre style="font-family:Calibri,sans-serif;white-space:pre-wrap;">${fullText.replace(
+    /</g,
+    '&lt;'
+  )}</pre></body></html>`;
+  const docBlob = new Blob([docHtml], { type: 'application/msword' });
+  const txtBlob = new Blob([fullText], { type: 'text/plain;charset=utf-8' });
+
+  return {
+    title: `Extracted ${pdf.numPages} page(s) to Word & TXT from ${file.name}`,
+    textPreview: fullText.slice(0, 4000),
+    downloadUrl: URL.createObjectURL(docBlob),
+    downloadName: `${baseName}.doc`,
+    secondaryUrl: URL.createObjectURL(txtBlob),
+    secondaryName: `${baseName}.txt`,
+  };
 }
 
 // ============================================================================
-// Main Single-File Web Application: ShMp3100 Tool — PDFMR Studio
+// Main Application: ShMp3100 Tool — All-in-One PDF Workspace + Scan Studio
 // ============================================================================
 
 export default function App() {
-  const hiddenImageInputRef = useRef<HTMLInputElement | null>(null);
-  const toolkitPdfInputRef = useRef<HTMLInputElement | null>(null);
+  // Primary Mode: All-in-One Workspace (image_633ed9b7.png UI) OR Dedicated Scan Document Studio (35baa0fa...png UI)
+  const [section, setSection] = useState<WorkspaceSection>('all-tools');
+  const [scanStudioActive, setScanStudioActive] = useState(false);
+  const [scanStep, setScanStep] = useState<ScanStudioStep>('scan');
+  const [scanCategory, setScanCategory] = useState<ScanCategory>('Doc');
+  const [editTab, setEditTab] = useState<EditTab>('crop');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [rgbModeScan, setRgbModeScan] = useState(false);
 
-  // Main View State (All Tools Hub vs Active Workspace)
-  const [view, setView] = useState<AppView>('tools');
-  const [activeToolkitTool, setActiveToolkitTool] = useState<PdfToolkitTool>('merge');
-
-  // Camera Scanner Modal State
-  const [cameraOpen, setCameraOpen] = useState(false);
+  // Camera & Auto-Detection State
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const detectCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+  const docConvertInputRef = useRef<HTMLInputElement | null>(null);
+
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraState, setCameraState] = useState<'idle' | 'active' | 'error'>('idle');
   const [cameraError, setCameraError] = useState('');
-  const [cameraFilter, setCameraFilter] = useState<ScanFilter>('crisp');
-  const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
+  const [flashOn, setFlashOn] = useState(false);
+  const [autoCapture, setAutoCapture] = useState(false);
+  const [detectedBox, setDetectedBox] = useState<DetectedBox | null>(null);
+  const [lockProgress, setLockProgress] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
 
-  // Image & Scan Workbench State
-  const [images, setImages] = useState<QueuedImageItem[]>([]);
-  const [selectedImageIdx, setSelectedImageIdx] = useState(0);
-  const [isDraggingImage, setIsDraggingImage] = useState(false);
+  // Image-to-PDF / Scanned Pages Queue
+  const [pages, setPages] = useState<ScannedPage[]>([]);
+  const [selectedPageIdx, setSelectedPageIdx] = useState(0);
 
-  // PDF Toolkit State
-  const [pdfFiles, setPdfFiles] = useState<QueuedPdfItem[]>([]);
-  const [isDraggingPdf, setIsDraggingPdf] = useState(false);
+  // Auto-Analysis, Book Name, Filename & Auto-Index State
+  const [documentTitle, setDocumentTitle] = useState('Scanned Document');
+  const [authorOrIssuer, setAuthorOrIssuer] = useState('ShMp3100 PDF Maker');
+  const [filename, setFilename] = useState('ShMp3100_Document');
+  const [includeIndex, setIncludeIndex] = useState(true);
+  const [indexEntries, setIndexEntries] = useState<IndexEntry[]>([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // PDF Output Settings
+  const [pageSize, setPageSize] = useState<PageSizeOption>('a4');
+  const [margin, setMargin] = useState<MarginOption>('compact');
+  const [watermarkEnabled, setWatermarkEnabled] = useState(true);
+  const [watermarkText, setWatermarkText] = useState('ShMp3100 Tool PDFMR');
+  const [watermarkOpacity, setWatermarkOpacity] = useState(0.2);
+  const [watermarkPlacement, setWatermarkPlacement] =
+    useState<WatermarkPlacement>('diagonal');
+  const [pageNumbersEnabled, setPageNumbersEnabled] = useState(true);
+
+  // Finish / Export State
+  const [isCompiling, setIsCompiling] = useState(false);
+  const [finalPdf, setFinalPdf] = useState<GeneratedPdfResult | null>(null);
+  const [previewModalUrl, setPreviewModalUrl] = useState<string | null>(null);
+  const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
+
+  // Toolkit & Converter State
+  const [toolkitTool, setToolkitTool] = useState<PdfToolkitTool>('txt-to-pdf');
+  const [toolkitFiles, setToolkitFiles] = useState<QueuedPdfItem[]>([]);
+  const [sourceDocFile, setSourceDocFile] = useState<File | null>(null);
+  const [workspaceTextInput, setWorkspaceTextInput] = useState('');
+  const [convertedOutput, setConvertedOutput] =
+    useState<ConvertedPreviewOutput | null>(null);
+  const [signatureName, setSignatureName] = useState('ShMp3100');
+  const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(null);
+  const sigCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const isDrawingSigRef = useRef(false);
   const [splitRange, setSplitRange] = useState('1');
   const [rotateDegrees, setRotateDegrees] = useState<90 | 180 | 270>(90);
   const [rotateRange, setRotateRange] = useState('');
   const [metaTitle, setMetaTitle] = useState('');
   const [metaAuthor, setMetaAuthor] = useState('ShMp3100');
-
-  // Template Press State
-  const [templateState, setTemplateState] = useState<TemplateDocumentState>(
-    TEMPLATE_PRESETS.invoice
+  const [protectNotice, setProtectNotice] = useState(
+    'CONFIDENTIAL · PROTECTED BY SHMP3100 PDFMR'
   );
 
-  // Export & Watermark Config
-  const [exportConfig, setExportConfig] = useState<ExportConfig>({
-    filename: 'ShMp3100_Document',
-    pageSize: 'a4',
-    orientation: 'portrait',
-    margin: 'standard',
-    watermark: {
-      enabled: true,
-      text: 'ShMp3100 Tool PDFMR',
-      opacity: 0.2,
-      placement: 'diagonal',
-    },
-    pageNumbers: {
-      enabled: true,
-      position: 'bottom-right',
-    },
-  });
+  // Templates State (Invoice, Project Brief, Certificate)
+  const [activeTemplate, setActiveTemplate] = useState<TemplateKind>('invoice');
+  const [invoiceClient, setInvoiceClient] = useState('Acme Studio Ltd.');
+  const [invoiceNumber, setInvoiceNumber] = useState('INV-2026-104');
+  const [invoiceItems, setInvoiceItems] = useState<InvoiceLineItem[]>([
+    { id: '1', description: 'Document Digitization & Archiving', qty: 1, unitPrice: 180 },
+    { id: '2', description: 'PDF Index & Compliance Package', qty: 2, unitPrice: 65 },
+  ]);
+  const [briefTitle, setBriefTitle] = useState('Q4 Digital Archive Specification');
+  const [briefSummary, setBriefSummary] = useState(
+    'Complete document capture, automated OCR indexing, and standardized PDF delivery workflow.'
+  );
+  const [briefScope, setBriefScope] = useState(
+    '1. High-resolution edge-cropped page scanning\n2. Automated chapter index generation\n3. Embedded ShMp3100 Tool PDFMR verification stamp'
+  );
+  const [certRecipient, setCertRecipient] = useState('Ahmad Tariq');
+  const [certCourse, setCertCourse] = useState(
+    'Excellence in Digital Document Engineering'
+  );
+  const [certIssuer, setCertIssuer] = useState('ShMp3100 Studio');
 
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportsHistory, setExportsHistory] = useState<ExportedRecord[]>([]);
+  // Toast
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   const notify = useCallback((kind: 'success' | 'error', text: string) => {
@@ -1114,15 +1593,27 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 3400);
-    return () => window.clearTimeout(timer);
+    const t = window.setTimeout(() => setToast(null), 3400);
+    return () => window.clearTimeout(t);
   }, [toast]);
 
+  const activePage = pages[selectedPageIdx] || pages[0] || null;
+  const isRgbActive = (scanStudioActive && scanStep === 'finish') || rgbModeScan;
+
+  const invoiceTotal = useMemo(
+    () =>
+      invoiceItems.reduce(
+        (sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0),
+        0
+      ),
+    [invoiceItems]
+  );
+
   // ==========================================================================
-  // Camera Lifecycle & Controls
+  // Camera Lifecycle + Hardware Torch + Real-Time Document Edge Detection
   // ==========================================================================
 
-  const stopCameraStream = useCallback(() => {
+  const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -1132,15 +1623,15 @@ export default function App() {
     }
   }, []);
 
-  const startCameraStream = useCallback(
+  const startCamera = useCallback(
     async (facing: 'environment' | 'user') => {
-      stopCameraStream();
+      stopCamera();
       setCameraState('idle');
       setCameraError('');
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setCameraState('error');
-        setCameraError('Camera API is not supported in this browser.');
+        setCameraError('Camera API unavailable here. Upload images via Gallery below.');
         return;
       }
 
@@ -1163,38 +1654,158 @@ export default function App() {
         setCameraState('error');
         setCameraError(
           err instanceof Error
-            ? `Camera unavailable (${err.message}). Allow permission or upload image files directly.`
-            : 'Camera access denied. Allow permissions and retry.'
+            ? `Camera unavailable (${err.message}). Use Gallery to choose document images.`
+            : 'Camera access denied. Use Gallery to choose document images.'
         );
       }
     },
-    [stopCameraStream]
+    [stopCamera]
   );
 
   useEffect(() => {
-    if (cameraOpen) {
-      startCameraStream(facingMode);
+    if (scanStudioActive && scanStep === 'scan') {
+      startCamera(facingMode);
     } else {
-      stopCameraStream();
-      setCapturedFrames([]);
+      stopCamera();
+      setDetectedBox(null);
+      setLockProgress(0);
     }
-    return () => stopCameraStream();
-  }, [cameraOpen, facingMode, startCameraStream, stopCameraStream]);
+    return () => stopCamera();
+  }, [scanStudioActive, scanStep, facingMode, startCamera, stopCamera]);
 
   useEffect(() => {
-    if (!cameraOpen) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCameraOpen(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [cameraOpen]);
+    const stream = streamRef.current;
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+    const caps = track.getCapabilities?.() as
+      | (MediaTrackCapabilities & { torch?: boolean })
+      | undefined;
+    if (caps?.torch) {
+      track
+        .applyConstraints({
+          advanced: [{ torch: flashOn } as MediaTrackConstraintSet],
+        })
+        .catch(() => {});
+    }
+  }, [flashOn, cameraState]);
 
-  const handleCaptureCameraPage = async () => {
+  useEffect(() => {
+    if (!scanStudioActive || scanStep !== 'scan' || cameraState !== 'active') return;
+
+    const timer = window.setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+
+      if (!detectCanvasRef.current) {
+        detectCanvasRef.current = document.createElement('canvas');
+      }
+      const c = detectCanvasRef.current;
+      const sampleW = 160;
+      const sampleH = Math.max(
+        100,
+        Math.round(sampleW * (video.videoHeight / video.videoWidth))
+      );
+      if (c.width !== sampleW || c.height !== sampleH) {
+        c.width = sampleW;
+        c.height = sampleH;
+      }
+
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, sampleW, sampleH);
+
+      const box = detectDocumentBoundsFromCanvas(c);
+      setDetectedBox(box);
+      if (box && autoCapture && !isCapturing) {
+        setLockProgress((p) => Math.min(100, p + 25));
+      } else {
+        setLockProgress(0);
+      }
+    }, 220);
+
+    return () => window.clearInterval(timer);
+  }, [scanStudioActive, scanStep, cameraState, autoCapture, isCapturing]);
+
+  // ==========================================================================
+  // Image Upload / Camera Capture + Automatic Page Crop
+  // ==========================================================================
+
+  const addRawImageAsScannedPage = useCallback(
+    async (
+      rawUrl: string,
+      source: 'camera' | 'gallery',
+      label: string,
+      presetBox?: DetectedBox | null
+    ) => {
+      const autoCrop: CropBox = presetBox
+        ? {
+            top: Math.min(0.35, Math.max(0, Number(presetBox.y.toFixed(3)))),
+            left: Math.min(0.35, Math.max(0, Number(presetBox.x.toFixed(3)))),
+            right: Math.min(
+              0.35,
+              Math.max(0, Number((1 - (presetBox.x + presetBox.w)).toFixed(3)))
+            ),
+            bottom: Math.min(
+              0.35,
+              Math.max(0, Number((1 - (presetBox.y + presetBox.h)).toFixed(3)))
+            ),
+          }
+        : await autoDetectCropBoxFromUrl(rawUrl);
+
+      const defaultFilter: ScanFilter =
+        scanCategory === 'Doc' || scanCategory === 'Receipt' ? 'crisp' : 'original';
+
+      const rendered = await renderProcessedPage(
+        rawUrl,
+        autoCrop,
+        0,
+        defaultFilter,
+        104,
+        112
+      );
+
+      const newId = `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const newPage: ScannedPage = {
+        id: newId,
+        rawUrl,
+        processedUrl: rendered.dataUrl,
+        width: rendered.width,
+        height: rendered.height,
+        rotation: 0,
+        crop: autoCrop,
+        filter: defaultFilter,
+        brightness: 104,
+        contrast: 112,
+        category: scanCategory,
+        source,
+        label,
+      };
+
+      setPages((prev) => {
+        const next = [...prev, newPage];
+        setSelectedPageIdx(next.length - 1);
+        setIndexEntries((prevIdx) => [
+          ...prevIdx,
+          {
+            id: newId,
+            pageNumber: next.length,
+            heading: `${scanCategory} Page ${next.length}`,
+            summary: `${label} · Auto-cropped`,
+          },
+        ]);
+        return next;
+      });
+    },
+    [scanCategory]
+  );
+
+  const handleScanCapture = useCallback(async () => {
     const video = videoRef.current;
     if (!video || cameraState !== 'active' || isCapturing) return;
 
     setIsCapturing(true);
+    setLockProgress(0);
     try {
       const w = video.videoWidth || 1280;
       const h = video.videoHeight || 960;
@@ -1205,2335 +1816,1000 @@ export default function App() {
       if (!ctx) return;
       ctx.drawImage(video, 0, 0, w, h);
       const rawUrl = canvas.toDataURL('image/jpeg', 0.94);
-      const processed = await processImageToDataUrl(rawUrl, 0, cameraFilter);
 
-      setCapturedFrames((prev) => [
-        ...prev,
-        {
-          id: `scan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          rawUrl,
-          previewUrl: processed.dataUrl,
-          width: processed.width,
-          height: processed.height,
-          filter: cameraFilter,
-        },
-      ]);
+      await addRawImageAsScannedPage(
+        rawUrl,
+        'camera',
+        `${scanCategory}_Scan_${pages.length + 1}`,
+        detectedBox
+      );
+      notify('success', `Captured & auto-cropped page ${pages.length + 1}!`);
+    } catch {
+      notify('error', 'Failed to capture scanned page.');
     } finally {
       setIsCapturing(false);
     }
-  };
+  }, [
+    cameraState,
+    isCapturing,
+    addRawImageAsScannedPage,
+    scanCategory,
+    pages.length,
+    detectedBox,
+    notify,
+  ]);
 
-  const handleCycleCapturedFilter = async (frameId: string, nextFilter: ScanFilter) => {
-    const target = capturedFrames.find((c) => c.id === frameId);
-    if (!target) return;
-    const processed = await processImageToDataUrl(target.rawUrl, 0, nextFilter);
-    setCapturedFrames((prev) =>
-      prev.map((c) =>
-        c.id === frameId
-          ? { ...c, filter: nextFilter, previewUrl: processed.dataUrl }
-          : c
-      )
-    );
-  };
+  useEffect(() => {
+    if (
+      lockProgress >= 100 &&
+      autoCapture &&
+      scanStudioActive &&
+      scanStep === 'scan' &&
+      !isCapturing
+    ) {
+      handleScanCapture();
+    }
+  }, [lockProgress, autoCapture, scanStudioActive, scanStep, isCapturing, handleScanCapture]);
 
-  const handleCommitCameraScans = () => {
-    if (capturedFrames.length === 0) return;
-    const queued: QueuedImageItem[] = capturedFrames.map((frame, index) => ({
-      id: frame.id,
-      fileName: `Camera_Scan_${index + 1}.jpg`,
-      mimeType: 'image/jpeg',
-      sizeBytes: Math.round((frame.previewUrl.length * 3) / 4),
-      previewUrl: frame.previewUrl,
-      width: frame.width,
-      height: frame.height,
-      rotation: 0,
-      filter: frame.filter,
-      source: 'camera',
-    }));
-
-    setImages((prev) => {
-      const next = [...prev, ...queued];
-      setSelectedImageIdx(prev.length);
-      return next;
-    });
-    setCameraOpen(false);
-    setView('image-scan');
-    notify(
-      'success',
-      `Added ${queued.length} scanned ${queued.length === 1 ? 'page' : 'pages'} to workbench.`
-    );
-  };
-
-  // ==========================================================================
-  // File Handlers
-  // ==========================================================================
-
-  const handleAddImageFiles = useCallback(
-    async (rawFiles: FileList | File[]) => {
+  const handleImageFilesChosen = useCallback(
+    async (rawFiles: FileList | File[], openStudioEdit = false) => {
       const list = Array.from(rawFiles);
-      const added: QueuedImageItem[] = [];
+      let addedCount = 0;
       let skipped = 0;
 
       for (const file of list) {
         const ext = file.name.split('.').pop()?.toLowerCase() || '';
-        const isSupported =
+        const ok =
           ACCEPTED_IMAGE_MIME.has(file.type.toLowerCase()) ||
           ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
-
-        if (!isSupported) {
+        if (!ok) {
           skipped++;
           continue;
         }
-
-        const previewUrl = URL.createObjectURL(file);
         try {
-          const { width, height } = await readImageDimensions(previewUrl);
-          added.push({
-            id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            fileName: file.name,
-            mimeType: file.type || `image/${ext}`,
-            sizeBytes: file.size,
-            previewUrl,
-            width,
-            height,
-            rotation: 0,
-            filter: 'original',
-            source: 'upload',
-          });
+          const rawUrl = URL.createObjectURL(file);
+          await addRawImageAsScannedPage(
+            rawUrl,
+            'gallery',
+            file.name.replace(/\.[^.]+$/, '')
+          );
+          addedCount++;
         } catch {
-          URL.revokeObjectURL(previewUrl);
           skipped++;
         }
       }
 
-      if (added.length > 0) {
-        setImages((prev) => {
-          const next = [...prev, ...added];
-          setSelectedImageIdx(prev.length);
-          return next;
-        });
+      if (addedCount > 0) {
         notify(
           'success',
-          `Added ${added.length} ${added.length === 1 ? 'image' : 'images'} to the workbench.`
+          `Added & auto-cropped ${addedCount} ${addedCount === 1 ? 'document image' : 'document images'}.`
         );
+        if (openStudioEdit) {
+          setScanStudioActive(true);
+          setScanStep('edit');
+        }
       }
       if (skipped > 0) {
         notify(
           'error',
-          `Skipped ${skipped} unsupported file(s). Supported: JPG, JPEG, PNG, GIF, BMP, WEBP.`
+          `Skipped ${skipped} unsupported file(s). Use JPG, PNG, GIF, BMP, or WEBP.`
         );
       }
     },
-    [notify]
+    [addRawImageAsScannedPage, notify]
   );
 
-  const handleAddPdfFiles = useCallback(
-    async (rawFiles: FileList | File[]) => {
-      const list = Array.from(rawFiles);
-      const valid: QueuedPdfItem[] = [];
-      let failed = 0;
+  // ==========================================================================
+  // Edit & Manage Page Updaters + Auto-Analyze Book / Index
+  // ==========================================================================
 
-      for (const file of list) {
-        if (
-          file.type !== 'application/pdf' &&
-          !file.name.toLowerCase().endsWith('.pdf')
-        ) {
-          failed++;
-          continue;
-        }
-        try {
-          const inspected = await inspectPdfFile(file);
-          valid.push(inspected);
-        } catch {
-          failed++;
-        }
-      }
+  const updateActivePage = useCallback(
+    async (
+      patch: Partial<
+        Pick<
+          ScannedPage,
+          'crop' | 'rotation' | 'filter' | 'brightness' | 'contrast' | 'label'
+        >
+      >
+    ) => {
+      if (!activePage) return;
+      const nextCrop = patch.crop ?? activePage.crop;
+      const nextRot = patch.rotation ?? activePage.rotation;
+      const nextFilter = patch.filter ?? activePage.filter;
+      const nextBright = patch.brightness ?? activePage.brightness;
+      const nextContrast = patch.contrast ?? activePage.contrast;
 
-      if (valid.length > 0) {
-        const singleFileTool = activeToolkitTool !== 'merge';
-        setPdfFiles((prev) => (singleFileTool ? [valid[0]] : [...prev, ...valid]));
-        if (valid[0]) {
-          setSplitRange(`1-${Math.min(2, valid[0].pageCount)}`);
-          if (!metaTitle) setMetaTitle(valid[0].title);
-        }
-        notify(
-          'success',
-          `Loaded ${valid.length} PDF ${valid.length === 1 ? 'document' : 'documents'}.`
-        );
-      }
+      const rendered = await renderProcessedPage(
+        activePage.rawUrl,
+        nextCrop,
+        nextRot,
+        nextFilter,
+        nextBright,
+        nextContrast
+      );
 
-      if (failed > 0) {
-        notify('error', `Could not read ${failed} non-PDF or invalid file(s).`);
-      }
+      setPages((prev) =>
+        prev.map((p) =>
+          p.id === activePage.id
+            ? {
+                ...p,
+                ...patch,
+                processedUrl: rendered.dataUrl,
+                width: rendered.width,
+                height: rendered.height,
+              }
+            : p
+        )
+      );
     },
-    [activeToolkitTool, metaTitle, notify]
+    [activePage]
   );
 
-  // ==========================================================================
-  // Export Orchestration
-  // ==========================================================================
-
-  const canExport = useMemo(() => {
-    if (view === 'image-scan') return images.length > 0;
-    if (view === 'template-press') return true;
-    if (view === 'pdf-toolkit') {
-      if (activeToolkitTool === 'merge') return pdfFiles.length >= 2;
-      return pdfFiles.length >= 1;
-    }
-    return false;
-  }, [view, images.length, activeToolkitTool, pdfFiles.length]);
-
-  const exportLabel = useMemo(() => {
-    if (view === 'image-scan') return 'Create & Download PDF';
-    if (view === 'template-press') return 'Export Template PDF';
-    if (view === 'pdf-toolkit') {
-      if (activeToolkitTool === 'merge') return 'Merge & Download';
-      if (activeToolkitTool === 'split') return 'Extract Pages';
-      if (activeToolkitTool === 'rotate') return 'Rotate & Save';
-      if (activeToolkitTool === 'watermark') return 'Apply Stamp & Save';
-      if (activeToolkitTool === 'page-numbers') return 'Number & Save';
-      return 'Save Clean PDF';
-    }
-    return 'Create PDF';
-  }, [view, activeToolkitTool]);
-
-  const handlePrimaryExport = async () => {
-    if (!canExport || isExporting) return;
-    setIsExporting(true);
-    try {
-      let result: GeneratedPdfResult;
-      let toolLabel = 'Image PDF';
-
-      if (view === 'image-scan') {
-        result = await buildPdfFromImages(images, exportConfig);
-        toolLabel = 'Images to PDF';
-      } else if (view === 'template-press') {
-        result = await buildTemplatePdf(templateState, exportConfig);
-        toolLabel = `Template · ${templateState.kind}`;
-      } else if (activeToolkitTool === 'merge') {
-        result = await mergePdfFiles(pdfFiles, exportConfig);
-        toolLabel = 'Merged PDF';
-      } else if (activeToolkitTool === 'split') {
-        result = await splitPdfFile(pdfFiles[0], splitRange, exportConfig);
-        toolLabel = 'Split Pages';
-      } else if (activeToolkitTool === 'rotate') {
-        result = await rotatePdfFile(
-          pdfFiles[0],
-          rotateDegrees,
-          rotateRange,
-          exportConfig
+  const applyFilterToAllPages = async (
+    filter: ScanFilter,
+    brightness: number,
+    contrast: number
+  ) => {
+    if (pages.length === 0) return;
+    const updated = await Promise.all(
+      pages.map(async (p) => {
+        const rendered = await renderProcessedPage(
+          p.rawUrl,
+          p.crop,
+          p.rotation,
+          filter,
+          brightness,
+          contrast
         );
-        toolLabel = `Rotated ${rotateDegrees}°`;
-      } else if (activeToolkitTool === 'metadata') {
-        result = await stampPdfFile(pdfFiles[0], exportConfig, {
-          title: metaTitle,
-          author: metaAuthor,
-        });
-        toolLabel = 'Metadata Clean';
-      } else {
-        const forcedConfig: ExportConfig = {
-          ...exportConfig,
-          watermark:
-            activeToolkitTool === 'watermark'
-              ? { ...exportConfig.watermark, enabled: true }
-              : exportConfig.watermark,
-          pageNumbers:
-            activeToolkitTool === 'page-numbers'
-              ? { ...exportConfig.pageNumbers, enabled: true }
-              : exportConfig.pageNumbers,
+        return {
+          ...p,
+          filter,
+          brightness,
+          contrast,
+          processedUrl: rendered.dataUrl,
+          width: rendered.width,
+          height: rendered.height,
         };
-        result = await stampPdfFile(pdfFiles[0], forcedConfig);
-        toolLabel =
-          activeToolkitTool === 'watermark' ? 'Watermarked PDF' : 'Numbered PDF';
+      })
+    );
+    setPages(updated);
+    notify('success', `Applied "${filter}" scan filter to all ${updated.length} pages.`);
+  };
+
+  const handleAutoAnalyzeAndIndex = useCallback(async () => {
+    if (pages.length === 0 || isAnalyzing) return;
+    setIsAnalyzing(true);
+    try {
+      const payloadImages = pages.slice(0, 4).map((p) => ({
+        mimeType: 'image/jpeg',
+        dataBase64: p.processedUrl.split(',')[1] || '',
+      }));
+
+      const res = await fetch('/api/analyze-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images: payloadImages,
+          scanMode: scanCategory,
+        }),
+      });
+
+      if (!res.ok) throw new Error('Smart analyzer unavailable; applied local index.');
+
+      const data = (await res.json()) as {
+        documentTitle?: string;
+        suggestedFilename?: string;
+        authorOrIssuer?: string;
+        indexEntries?: Array<{
+          pageNumber?: number;
+          heading?: string;
+          summary?: string;
+        }>;
+      };
+
+      const detectedTitle = data.documentTitle?.trim() || `${scanCategory} Scan`;
+      const detectedFile =
+        data.suggestedFilename?.trim() ||
+        detectedTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+      setDocumentTitle(detectedTitle);
+      if (detectedFile) setFilename(detectedFile);
+      if (data.authorOrIssuer?.trim()) setAuthorOrIssuer(data.authorOrIssuer.trim());
+
+      if (Array.isArray(data.indexEntries) && data.indexEntries.length > 0) {
+        setIndexEntries(
+          pages.map((p, idx) => {
+            const match = data.indexEntries?.find((e) => e.pageNumber === idx + 1);
+            return {
+              id: p.id,
+              pageNumber: idx + 1,
+              heading: match?.heading?.trim() || p.label || `Page ${idx + 1}`,
+              summary:
+                match?.summary?.trim() || `${scanCategory} · ${p.filter.toUpperCase()}`,
+            };
+          })
+        );
       }
 
-      triggerDownload(result.url, result.filename);
+      setIncludeIndex(true);
+      notify('success', `Identified "${detectedTitle}" and built automatic index!`);
+    } catch {
+      const firstLabel = pages[0]?.label || `${scanCategory}_Document`;
+      const cleanName = firstLabel.replace(/[^a-zA-Z0-9_-]+/g, '_');
+      setDocumentTitle(firstLabel.replace(/_/g, ' '));
+      setFilename(`${cleanName}_${pages.length}p`);
+      setIndexEntries(
+        pages.map((p, idx) => ({
+          id: p.id,
+          pageNumber: idx + 1,
+          heading: p.label || `${scanCategory} Page ${idx + 1}`,
+          summary: `${p.category} · Filter: ${p.filter}`,
+        }))
+      );
+      setIncludeIndex(true);
+      notify('success', `Auto-indexed ${pages.length} pages and updated filename.`);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [pages, isAnalyzing, scanCategory, notify]);
 
-      setExportsHistory((prev) => [
+  const handleBuildFinalPdf = useCallback(async () => {
+    if (pages.length === 0 || isCompiling) return;
+    setIsCompiling(true);
+    try {
+      const result = await compileScannedPdf({
+        pages,
+        filename,
+        documentTitle,
+        authorOrIssuer,
+        includeIndex,
+        indexEntries,
+        pageSize,
+        margin,
+        watermarkEnabled,
+        watermarkText,
+        watermarkOpacity,
+        watermarkPlacement,
+        pageNumbersEnabled,
+      });
+
+      setFinalPdf(result);
+      setExportHistory((prev) => [
         {
           id: `exp-${Date.now()}`,
           filename: result.filename,
           url: result.url,
           sizeBytes: result.sizeBytes,
           pageCount: result.pageCount,
-          toolLabel,
           createdAt: new Date().toLocaleTimeString([], {
             hour: '2-digit',
             minute: '2-digit',
           }),
         },
-        ...prev.slice(0, 9),
+        ...prev.slice(0, 8),
       ]);
 
+      triggerDownload(result.url, result.filename);
       notify(
         'success',
-        `Downloaded ${result.filename} (${result.pageCount} ${
-          result.pageCount === 1 ? 'page' : 'pages'
-        }, ${formatBytes(result.sizeBytes)}).`
+        `PDF ready & downloaded: ${result.filename} (${result.pageCount} pages)`
       );
     } catch (err) {
       notify(
         'error',
-        err instanceof Error ? err.message : 'PDF generation failed.'
+        err instanceof Error ? err.message : 'Failed to build final PDF.'
       );
     } finally {
-      setIsExporting(false);
+      setIsCompiling(false);
+    }
+  }, [
+    pages,
+    isCompiling,
+    filename,
+    documentTitle,
+    authorOrIssuer,
+    includeIndex,
+    indexEntries,
+    pageSize,
+    margin,
+    watermarkEnabled,
+    watermarkText,
+    watermarkOpacity,
+    watermarkPlacement,
+    pageNumbersEnabled,
+    notify,
+  ]);
+
+  const handleGoToFinishPdf = () => {
+    if (pages.length === 0) {
+      notify('error', 'Choose or scan at least one page first.');
+      return;
+    }
+    setScanStudioActive(true);
+    setScanStep('finish');
+    if (documentTitle === 'Scanned Document' && !isAnalyzing) {
+      handleAutoAnalyzeAndIndex();
     }
   };
 
-  // Helper computed values for live preview
-  const activeImage = images[selectedImageIdx] || images[0] || null;
-  const totalToolkitPages = pdfFiles.reduce((acc, f) => acc + f.pageCount, 0);
-  const totalInvoiceAmount = templateState.lineItems.reduce(
-    (sum, item) => sum + item.qty * item.rate,
-    0
-  );
-
-  const getFilterCss = (filter: ScanFilter) => {
-    if (filter === 'crisp') return 'contrast(1.25) brightness(1.06) saturate(1.08)';
-    if (filter === 'mono') return 'grayscale(1) contrast(1.42) brightness(1.08)';
-    return 'none';
+  // Launch Scan Document Studio on chosen files or camera
+  const openScanDocumentStudio = (initialStep: ScanStudioStep = 'scan') => {
+    setScanStudioActive(true);
+    setScanStep(initialStep);
   };
 
-  const sheetAspectClass =
-    exportConfig.pageSize === 'fit'
-      ? 'aspect-[4/5]'
-      : exportConfig.orientation === 'landscape'
-        ? exportConfig.pageSize === 'letter'
-          ? 'aspect-[11/8.5] max-w-[640px]'
-          : 'aspect-[1.414/1] max-w-[640px]'
-        : exportConfig.pageSize === 'letter'
-          ? 'aspect-[8.5/11] max-w-[440px]'
-          : 'aspect-[1/1.414] max-w-[440px]';
+  // ==========================================================================
+  // Workspace Toolkit & Template Handlers
+  // ==========================================================================
 
-  const marginPaddingClass =
-    exportConfig.margin === 'none'
-      ? 'p-0'
-      : exportConfig.margin === 'compact'
-        ? 'p-4'
-        : 'p-8';
-
-  const openPresetTool = (
-    nextView: AppView,
-    toolkit?: PdfToolkitTool,
-    templateKind?: TemplateKind
-  ) => {
-    if (toolkit) setActiveToolkitTool(toolkit);
-    if (templateKind) setTemplateState(TEMPLATE_PRESETS[templateKind]);
-    setView(nextView);
+  const handleOpenToolkitOption = (tool: PdfToolkitTool) => {
+    setConvertedOutput(null);
+    setToolkitTool(tool);
+    setSection('toolkit');
+    setScanStudioActive(false);
   };
+
+  const handleAddToolkitPdfs = async (rawFiles: FileList | File[]) => {
+    const list = Array.from(rawFiles);
+    const valid: QueuedPdfItem[] = [];
+    for (const f of list) {
+      if (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')) {
+        try {
+          valid.push(await inspectPdfFile(f));
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (valid.length > 0) {
+      setToolkitFiles((prev) =>
+        toolkitTool === 'merge' ? [...prev, ...valid] : [valid[0]]
+      );
+      setSplitRange(`1-${Math.min(2, valid[0].pageCount)}`);
+      if (!metaTitle) setMetaTitle(valid[0].title);
+      notify('success', `Loaded ${valid.length} PDF file(s).`);
+    } else {
+      notify('error', 'Please select valid PDF files.');
+    }
+  };
+
+  const handleRunToolkitExport = async () => {
+    setIsCompiling(true);
+    setConvertedOutput(null);
+    try {
+      if (
+        toolkitTool === 'word-to-pdf' ||
+        toolkitTool === 'ppt-to-pdf' ||
+        toolkitTool === 'excel-to-pdf' ||
+        toolkitTool === 'html-to-pdf' ||
+        toolkitTool === 'txt-to-pdf'
+      ) {
+        const res = await convertSourceToPdf({
+          tool: toolkitTool,
+          textInput: workspaceTextInput,
+          sourceFile: sourceDocFile,
+          filename,
+          watermarkEnabled,
+          watermarkText,
+          watermarkOpacity,
+        });
+        setFinalPdf(res);
+        triggerDownload(res.url, res.filename);
+        setExportHistory((prev) => [
+          {
+            id: `exp-${Date.now()}`,
+            filename: res.filename,
+            url: res.url,
+            sizeBytes: res.sizeBytes,
+            pageCount: res.pageCount,
+            createdAt: new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          },
+          ...prev.slice(0, 8),
+        ]);
+        notify('success', `Converted & downloaded ${res.filename}!`);
+        return;
+      }
+
+      if (
+        toolkitTool === 'pdf-to-word' ||
+        toolkitTool === 'pdf-to-image' ||
+        toolkitTool === 'pdf-to-ppt' ||
+        toolkitTool === 'pdf-to-excel'
+      ) {
+        if (toolkitFiles.length === 0) throw new Error('Select a PDF file first.');
+        const out = await convertPdfToTarget(toolkitTool, toolkitFiles[0].file);
+        setConvertedOutput(out);
+        triggerDownload(out.downloadUrl, out.downloadName);
+        notify('success', out.title);
+        return;
+      }
+
+      if (toolkitTool === 'ocr') {
+        if (toolkitFiles.length === 0) throw new Error('Select a PDF file first.');
+        const bytes = new Uint8Array(await toolkitFiles[0].file.arrayBuffer());
+        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        const maxSample = Math.min(3, pdf.numPages);
+        const imgs: { mimeType: string; dataBase64: string }[] = [];
+        for (let p = 1; p <= maxSample; p++) {
+          const page = await pdf.getPage(p);
+          const vp = page.getViewport({ scale: 1.2 });
+          const c = document.createElement('canvas');
+          c.width = vp.width;
+          c.height = vp.height;
+          const ctx = c.getContext('2d');
+          if (ctx) {
+            await page.render({ canvasContext: ctx, viewport: vp, canvas: c }).promise;
+            imgs.push({
+              mimeType: 'image/jpeg',
+              dataBase64: c.toDataURL('image/jpeg', 0.85).split(',')[1] || '',
+            });
+          }
+        }
+        const res = await fetch('/api/analyze-document', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images: imgs, scanMode: 'PDF OCR' }),
+        });
+        if (!res.ok) throw new Error('OCR analysis request failed.');
+        const data = (await res.json()) as {
+          documentTitle?: string;
+          suggestedFilename?: string;
+          authorOrIssuer?: string;
+          indexEntries?: { pageNumber?: number; heading?: string; summary?: string }[];
+        };
+        const summaryText = [
+          `Detected Title: ${data.documentTitle || toolkitFiles[0].title}`,
+          `Suggested Filename: ${data.suggestedFilename || toolkitFiles[0].fileName}`,
+          `Issuer / Author: ${data.authorOrIssuer || 'Detected Document'}`,
+          '',
+          'Auto-Index Breakdown:',
+          ...(data.indexEntries || []).map(
+            (e) => `Page ${e.pageNumber}: ${e.heading} — ${e.summary || ''}`
+          ),
+        ].join('\n');
+        const txtBlob = new Blob([summaryText], { type: 'text/plain;charset=utf-8' });
+        setConvertedOutput({
+          title: `OCR & Auto-Index completed for ${toolkitFiles[0].fileName}`,
+          textPreview: summaryText,
+          downloadUrl: URL.createObjectURL(txtBlob),
+          downloadName: `${data.suggestedFilename || 'OCR_Index'}.txt`,
+        });
+        notify('success', `OCR detected "${data.documentTitle || toolkitFiles[0].title}"!`);
+        return;
+      }
+
+      if (toolkitTool === 'sign' || toolkitTool === 'protect') {
+        if (toolkitFiles.length === 0) throw new Error('Select a PDF file first.');
+        const buf = await toolkitFiles[0].file.arrayBuffer();
+        const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+        const pdfPages = doc.getPages();
+        const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+
+        if (toolkitTool === 'sign') {
+          const lastPage = pdfPages[pdfPages.length - 1];
+          const { width } = lastPage.getSize();
+          if (signatureDataUrl) {
+            const pngBytes = await fetch(signatureDataUrl).then((r) => r.arrayBuffer());
+            const sigImg = await doc.embedPng(pngBytes);
+            lastPage.drawImage(sigImg, { x: width - 170, y: 42, width: 130, height: 48 });
+          } else {
+            lastPage.drawText(`Signed: ${signatureName || 'ShMp3100'}`, {
+              x: width - 190,
+              y: 46,
+              size: 13,
+              font: boldFont,
+              color: rgb(0.1, 0.25, 0.65),
+            });
+          }
+        } else {
+          pdfPages.forEach((pg) => {
+            const { width } = pg.getSize();
+            pg.drawText(protectNotice, {
+              x: 24,
+              y: 22,
+              size: 8.5,
+              font: boldFont,
+              color: rgb(0.75, 0.14, 0.14),
+              opacity: 0.7,
+            });
+            pg.drawText('VERIFIED READ-ONLY', {
+              x: width - 130,
+              y: 22,
+              size: 8.5,
+              font: boldFont,
+              color: rgb(0.3, 0.35, 0.45),
+              opacity: 0.7,
+            });
+          });
+          if (metaTitle.trim()) doc.setTitle(metaTitle.trim());
+          if (metaAuthor.trim()) doc.setAuthor(metaAuthor.trim());
+        }
+        doc.setCreator('ShMp3100 Tool PDFMR');
+        const outBytes = await doc.save({ useObjectStreams: true });
+        const blob = new Blob([new Uint8Array(outBytes)], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const outName = normalizePdfFilename(
+          `${toolkitFiles[0].fileName.replace(/\.pdf$/i, '')}_${toolkitTool}`,
+          'ShMp3100_Signed'
+        );
+        setFinalPdf({
+          blob,
+          url,
+          filename: outName,
+          pageCount: doc.getPageCount(),
+          sizeBytes: blob.size,
+        });
+        triggerDownload(url, outName);
+        notify('success', `Downloaded ${outName}!`);
+        return;
+      }
+
+      const res = await processToolkitPdf({
+        tool: toolkitTool,
+        files: toolkitFiles,
+        filename,
+        splitRange,
+        rotateDegrees,
+        rotateRange,
+        metaTitle,
+        metaAuthor,
+        watermarkEnabled,
+        watermarkText,
+        watermarkOpacity,
+        pageNumbersEnabled,
+      });
+      setFinalPdf(res);
+      triggerDownload(res.url, res.filename);
+      setExportHistory((prev) => [
+        {
+          id: `exp-${Date.now()}`,
+          filename: res.filename,
+          url: res.url,
+          sizeBytes: res.sizeBytes,
+          pageCount: res.pageCount,
+          createdAt: new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+        },
+        ...prev.slice(0, 8),
+      ]);
+      notify('success', `Downloaded ${res.filename} (${res.pageCount} pages).`);
+    } catch (err) {
+      notify(
+        'error',
+        err instanceof Error ? err.message : 'Workspace operation failed.'
+      );
+    } finally {
+      setIsCompiling(false);
+    }
+  };
+
+  const handleGenerateTemplatePdf = async (kind: TemplateKind) => {
+    setIsCompiling(true);
+    try {
+      let doc: jsPDF;
+      let outName = 'ShMp3100_Template.pdf';
+
+      if (kind === 'invoice') {
+        doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        doc.setFillColor(109, 40, 217);
+        doc.rect(0, 0, pw, 34, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(20);
+        doc.setTextColor(255, 255, 255);
+        doc.text('INVOICE', 18, 20);
+        doc.setFontSize(10);
+        doc.text(invoiceNumber, pw - 18, 16, { align: 'right' });
+        doc.text(new Date().toLocaleDateString(), pw - 18, 23, { align: 'right' });
+
+        doc.setTextColor(30, 30, 40);
+        doc.setFontSize(11);
+        doc.text(`Billed To: ${invoiceClient}`, 18, 48);
+
+        let y = 64;
+        doc.setFillColor(243, 240, 255);
+        doc.rect(18, y - 6, pw - 36, 9, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.text('Description', 22, y);
+        doc.text('Qty', pw - 68, y, { align: 'right' });
+        doc.text('Unit', pw - 44, y, { align: 'right' });
+        doc.text('Total', pw - 22, y, { align: 'right' });
+        y += 10;
+
+        doc.setFont('helvetica', 'normal');
+        invoiceItems.forEach((item) => {
+          const lineTotal = item.qty * item.unitPrice;
+          doc.text(item.description.slice(0, 48), 22, y);
+          doc.text(String(item.qty), pw - 68, y, { align: 'right' });
+          doc.text(`$${item.unitPrice.toFixed(2)}`, pw - 44, y, { align: 'right' });
+          doc.text(`$${lineTotal.toFixed(2)}`, pw - 22, y, { align: 'right' });
+          y += 8;
+        });
+
+        y += 6;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(109, 40, 217);
+        doc.text(`Grand Total: $${invoiceTotal.toFixed(2)}`, pw - 22, y, {
+          align: 'right',
+        });
+        drawJsPdfWatermark(doc, pw, ph, watermarkEnabled, watermarkText, 0.14, 'footer');
+        outName = normalizePdfFilename(invoiceNumber, 'Invoice');
+      } else if (kind === 'brief') {
+        doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        doc.setFillColor(30, 27, 75);
+        doc.rect(0, 0, pw, 36, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(18);
+        doc.setTextColor(255, 255, 255);
+        doc.text(briefTitle.slice(0, 52), 18, 22);
+
+        doc.setTextColor(25, 25, 35);
+        doc.setFontSize(12);
+        doc.text('Executive Summary', 18, 52);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10.5);
+        const sumLines = doc.splitTextToSize(briefSummary, pw - 36);
+        doc.text(sumLines, 18, 60);
+
+        const scopeY = 64 + sumLines.length * 6 + 10;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text('Deliverables & Scope', 18, scopeY);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10.5);
+        doc.text(doc.splitTextToSize(briefScope, pw - 36), 18, scopeY + 8);
+        drawJsPdfWatermark(doc, pw, ph, watermarkEnabled, watermarkText, 0.14, 'footer');
+        outName = normalizePdfFilename(briefTitle, 'Project_Brief');
+      } else {
+        doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        doc.setDrawColor(109, 40, 217);
+        doc.setLineWidth(3);
+        doc.rect(12, 12, pw - 24, ph - 24);
+        doc.setDrawColor(167, 139, 250);
+        doc.setLineWidth(0.8);
+        doc.rect(16, 16, pw - 32, ph - 32);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.setTextColor(109, 40, 217);
+        doc.text('CERTIFICATE OF RECOGNITION', pw / 2, 46, { align: 'center' });
+
+        doc.setFontSize(30);
+        doc.setTextColor(24, 24, 36);
+        doc.text(certRecipient || 'Recipient Name', pw / 2, 86, { align: 'center' });
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(14);
+        doc.setTextColor(75, 85, 99);
+        doc.text(certCourse, pw / 2, 110, { align: 'center' });
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text(`Issued by ${certIssuer} · ${new Date().toLocaleDateString()}`, pw / 2, 154, {
+          align: 'center',
+        });
+        drawJsPdfWatermark(doc, pw, ph, watermarkEnabled, watermarkText, 0.12, 'footer');
+        outName = normalizePdfFilename(`Certificate_${certRecipient}`, 'Certificate');
+      }
+
+      const blob = doc.output('blob');
+      const url = URL.createObjectURL(blob);
+      const res: GeneratedPdfResult = {
+        blob,
+        url,
+        filename: outName,
+        pageCount: doc.getNumberOfPages(),
+        sizeBytes: blob.size,
+      };
+      setFinalPdf(res);
+      triggerDownload(url, outName);
+      notify('success', `Generated & downloaded ${outName}!`);
+    } catch {
+      notify('error', 'Could not generate template PDF.');
+    } finally {
+      setIsCompiling(false);
+    }
+  };
+
+  const pageOrderMove = (idx: number, dir: -1 | 1) => {
+    const target = idx + dir;
+    if (target < 0 || target >= pages.length) return;
+    setPages((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(idx, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+    setIndexEntries((prev) => {
+      const next = [...prev];
+      if (next[idx] && next[target]) {
+        const [moved] = next.splice(idx, 1);
+        next.splice(target, 0, moved);
+        return next.map((e, i) => ({ ...e, pageNumber: i + 1 }));
+      }
+      return next;
+    });
+    setSelectedPageIdx(target);
+  };
+
+  const removePageById = (id: string) => {
+    setPages((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      setSelectedPageIdx((cur) => Math.max(0, Math.min(cur, next.length - 1)));
+      return next;
+    });
+    setIndexEntries((prev) =>
+      prev
+        .filter((e) => e.id !== id)
+        .map((e, i) => ({ ...e, pageNumber: i + 1 }))
+    );
+  };
+
+  const accentBorderColor = isRgbActive
+    ? 'border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.45)]'
+    : 'border-[#EF4444] shadow-[0_0_24px_rgba(239,68,68,0.45)]';
 
   return (
-    <div className="lavender-backdrop flex min-h-screen flex-col text-[#1E1B4B]">
-      {/* ====================================================================
-          Top Bar (3-Zone Contract)
-         ==================================================================== */}
-      <header className="sticky top-0 z-40 h-16 border-b border-[#E5DDFB] bg-white/85 backdrop-blur-md">
-        <div className="mx-auto flex h-full max-w-[1380px] items-center justify-between gap-8 px-4 sm:px-8">
-          {/* Zone 1: Brand Wordmark */}
-          <button
-            type="button"
-            onClick={() => setView('tools')}
-            className="flex items-center gap-3 whitespace-nowrap shrink-0 cursor-pointer text-left"
-          >
-            <ShMpBrandLogo size={34} />
-            <span className="font-display text-lg font-extrabold tracking-tight text-[#1E1B4B] whitespace-nowrap shrink-0">
-              ShMp3100 Tool
-            </span>
-          </button>
-
-          {/* Zone 2: 4 Single-line Navigation Links */}
-          <nav
-            aria-label="App workspaces"
-            className="hidden md:flex items-center gap-7"
-          >
-            <button
-              type="button"
-              onClick={() => setView('tools')}
-              className={`py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                view === 'tools'
-                  ? 'text-[#6C3CE1] underline decoration-2 underline-offset-8'
-                  : 'text-[#645E82] hover:text-[#1E1B4B]'
-              }`}
-            >
-              All Tools
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('image-scan')}
-              className={`py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                view === 'image-scan'
-                  ? 'text-[#6C3CE1] underline decoration-2 underline-offset-8'
-                  : 'text-[#645E82] hover:text-[#1E1B4B]'
-              }`}
-            >
-              Image &amp; Scan
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('pdf-toolkit')}
-              className={`py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                view === 'pdf-toolkit'
-                  ? 'text-[#6C3CE1] underline decoration-2 underline-offset-8'
-                  : 'text-[#645E82] hover:text-[#1E1B4B]'
-              }`}
-            >
-              PDF Toolkit
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('template-press')}
-              className={`py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                view === 'template-press'
-                  ? 'text-[#6C3CE1] underline decoration-2 underline-offset-8'
-                  : 'text-[#645E82] hover:text-[#1E1B4B]'
-              }`}
-            >
-              Templates
-            </button>
-          </nav>
-
-          {/* Zone 3: Single Primary Action */}
-          <div className="flex items-center shrink-0">
-            {view === 'tools' ? (
-              <button
-                type="button"
-                onClick={() => setCameraOpen(true)}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#6C3CE1] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#5B21B6] whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Camera className="h-4 w-4 shrink-0" />
-                <span>Camera Scan</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handlePrimaryExport}
-                disabled={!canExport || isExporting}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#6C3CE1] px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#5B21B6] disabled:cursor-not-allowed disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Download className="h-4 w-4 shrink-0" />
-                <span>{isExporting ? 'Generating...' : exportLabel}</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Mobile Navigation Strip */}
-      <div className="border-b border-[#E5DDFB] bg-white/80 px-4 py-2 md:hidden">
-        <div className="grid grid-cols-4 gap-1 rounded-xl bg-[#F3EFFE] p-1">
-          {(
-            [
-              { id: 'tools', label: 'Tools' },
-              { id: 'image-scan', label: 'Images' },
-              { id: 'pdf-toolkit', label: 'Toolkit' },
-              { id: 'template-press', label: 'Forms' },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setView(tab.id)}
-              className={`rounded-lg py-1.5 text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
-                view === tab.id
-                  ? 'bg-white text-[#6C3CE1] shadow-sm'
-                  : 'text-[#645E82]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </div>
+    <div
+      className={
+        scanStudioActive
+          ? `flex min-h-screen flex-col text-white transition-colors duration-500 ${
+              isRgbActive ? 'rgb-studio-bg' : 'scan-studio-bg'
+            }`
+          : 'workspace-lavender-bg flex min-h-screen flex-col text-slate-900'
+      }
+    >
+      {/* Hidden File Inputs */}
+      <input
+        ref={galleryInputRef}
+        type="file"
+        multiple
+        accept="image/jpeg,image/jpg,image/png,image/gif,image/bmp,image/webp"
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            handleImageFilesChosen(e.target.files, scanStudioActive);
+          }
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={pdfInputRef}
+        type="file"
+        multiple={toolkitTool === 'merge'}
+        accept="application/pdf,.pdf"
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            handleAddToolkitPdfs(e.target.files);
+          }
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={docConvertInputRef}
+        type="file"
+        accept=".docx,.pptx,.xlsx,.csv,.tsv,.html,.htm,.txt,.md"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0] || null;
+          if (file) {
+            setSourceDocFile(file);
+            notify('success', `Loaded ${file.name} for conversion.`);
+          }
+          e.target.value = '';
+        }}
+      />
 
       {/* ====================================================================
-          Main Web Application Content
+          MODE A: DEDICATED DARK SCAN DOCUMENT / EDIT / RGB FINISH STUDIO
+          (Activated ONLY on Scan Document / Image-to-PDF Scan Mode)
          ==================================================================== */}
-      <main className="mx-auto w-full max-w-[1380px] flex-1 px-4 py-8 sm:px-8">
-        {/* VIEW A: ALL TOOLS WEB APP DASHBOARD (No phone frame, direct web UI) */}
-        {view === 'tools' && (
-          <div className="space-y-8">
-            {/* Lavender App Hero Card directly on the Web Page */}
-            <div className="flex flex-col justify-between gap-6 rounded-3xl border border-[#DFD4FC] bg-gradient-to-br from-[#F3EFFE] via-[#EAE0FE] to-[#FFFFFF] p-6 shadow-[0_18px_48px_rgba(108,60,225,0.1)] sm:flex-row sm:items-center sm:p-8">
-              <div className="max-w-2xl space-y-2.5">
-                <h1 className="font-display text-2xl font-extrabold text-[#1E1B4B] sm:text-3xl">
-                  All-in-one PDF Workspace
+      {scanStudioActive ? (
+        <>
+          {flashOn && scanStep === 'scan' && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none fixed inset-0 z-10 border-[14px] border-white/25 bg-white/10"
+            />
+          )}
+
+          {/* Scan Document Top Header (Matching 35baa0fa...png) */}
+          <header className="relative z-30 mx-auto w-full max-w-[1160px] px-4 pt-3 sm:px-6">
+            <div className="relative flex items-center justify-between rounded-2xl border border-white/10 bg-[#1B0F11]/85 px-4 py-3 shadow-2xl backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={() => {
+                  if (scanStep === 'finish') setScanStep('edit');
+                  else if (scanStep === 'edit') setScanStep('scan');
+                  else {
+                    setScanStudioActive(false);
+                    setSection('image-scan');
+                  }
+                }}
+                aria-label="Back"
+                className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold text-white/90 transition-colors hover:bg-white/10 cursor-pointer"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                <span className="hidden sm:inline">
+                  {scanStep === 'scan'
+                    ? 'Workspace'
+                    : scanStep === 'finish'
+                      ? 'Edit'
+                      : 'Scanner'}
+                </span>
+              </button>
+
+              <div className="text-center">
+                <h1 className="font-display text-lg font-extrabold tracking-tight text-white sm:text-xl">
+                  {scanStep === 'scan'
+                    ? 'Scan Document'
+                    : scanStep === 'edit'
+                      ? 'Edit & Manage'
+                      : 'Finish PDF'}
                 </h1>
-                <p className="text-sm leading-relaxed text-[#544D73] sm:text-base">
-                  Convert images, scan documents with your camera, merge or split PDFs, rotate pages, and publish templates with your <span className="font-semibold text-[#4C1D95]">ShMp3100 Tool PDFMR</span> watermark—all inside one fast web app.
+                <p className="font-mono-tabular text-[11px] font-medium tracking-wider text-white/60">
+                  SHMP3100 PDF Maker
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-3 shrink-0">
+
+              <div className="relative">
                 <button
                   type="button"
-                  onClick={() => openPresetTool('image-scan')}
-                  className="inline-flex items-center gap-2 rounded-xl bg-[#6C3CE1] px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#5B21B6] whitespace-nowrap cursor-pointer"
+                  onClick={() => setMenuOpen((o) => !o)}
+                  aria-label="Studio options menu"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-white/90 transition-colors hover:bg-white/10 cursor-pointer"
                 >
-                  <ImagePlus className="h-4 w-4" />
-                  <span>Create PDF</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCameraOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-xl border border-[#DFD4FC] bg-white px-5 py-2.5 text-sm font-bold text-[#4C1D95] transition-colors hover:border-[#6C3CE1] whitespace-nowrap cursor-pointer"
-                >
-                  <Camera className="h-4 w-4 text-[#6C3CE1]" />
-                  <span>Scan Document</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Section 1: Convert & Create PDF (Direct Web Page Grid) */}
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="font-display text-lg font-extrabold text-[#1E1B4B]">
-                  Convert &amp; Create PDF
-                </h2>
-                <span className="text-xs font-medium text-[#645E82]">
-                  Select any tool to launch its workspace
-                </span>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <button
-                  type="button"
-                  onClick={() => openPresetTool('image-scan')}
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#7C3AED] text-white shadow-sm">
-                    <ImageIcon className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      Image to PDF
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      JPG, JPEG, PNG, GIF, BMP, WEBP
-                    </p>
-                  </div>
+                  <MoreHorizontal className="h-5 w-5" />
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setCameraOpen(true)}
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#EA580C] text-white shadow-sm">
-                    <Camera className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      Camera Scanner
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Live multi-page scan &amp; contrast filters
-                    </p>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openPresetTool('template-press', undefined, 'note')}
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#2563EB] text-white shadow-sm">
-                    <FileText className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      TXT &amp; Notes to PDF
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Turn text notes into clean vector PDFs
-                    </p>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openPresetTool('template-press', undefined, 'invoice')}
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#16A34A] text-white shadow-sm">
-                    <FileSpreadsheet className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      Invoice Generator
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Editable line items with automatic totals
-                    </p>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openPresetTool('template-press', undefined, 'brief')}
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#4F46E5] text-white shadow-sm">
-                    <Code2 className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      Project Brief PDF
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Structured specification &amp; report sheet
-                    </p>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    openPresetTool('template-press', undefined, 'certificate')
-                  }
-                  className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
-                >
-                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#0284C7] text-white shadow-sm">
-                    <Award className="h-6 w-6" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                      Certificate Maker
-                    </div>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Landscape bordered certificate press
-                    </p>
-                  </div>
-                </button>
-              </div>
-            </section>
-
-            {/* Section 2: Manage & Edit PDF */}
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="font-display text-lg font-extrabold text-[#1E1B4B]">
-                  Manage &amp; Edit PDF
-                </h2>
-                <span className="text-xs font-medium text-[#645E82]">
-                  Client-side pdf-lib document engine
-                </span>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {TOOLKIT_ITEMS.map((tool) => {
-                  const Icon = tool.icon;
-                  return (
+                {menuOpen && (
+                  <div className="absolute right-0 top-12 z-50 w-60 rounded-2xl border border-white/15 bg-[#171115]/95 p-2 shadow-2xl backdrop-blur-xl">
                     <button
-                      key={tool.id}
                       type="button"
-                      onClick={() => openPresetTool('pdf-toolkit', tool.id)}
-                      className="flex items-center gap-4 rounded-2xl border border-[#E5DDFB] bg-white p-4 text-left shadow-[0_10px_28px_rgba(108,60,225,0.06)] transition-all duration-150 hover:-translate-y-0.5 hover:border-[#6C3CE1] cursor-pointer"
+                      onClick={() => {
+                        setRgbModeScan((v) => !v);
+                        setMenuOpen(false);
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
                     >
-                      <span
-                        className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${tool.colorClass}`}
-                      >
-                        <Icon className="h-6 w-6" />
+                      <span>Studio Light Mode</span>
+                      <span className="font-mono-tabular text-[11px] text-cyan-300">
+                        {isRgbActive ? 'RGB Light' : 'Crimson'}
                       </span>
-                      <div className="min-w-0">
-                        <div className="font-display text-base font-extrabold text-[#1E1B4B]">
-                          {tool.label}
-                        </div>
-                        <p className="mt-0.5 text-xs text-[#645E82]">
-                          {tool.description}
-                        </p>
-                      </div>
                     </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            {/* Section 3: Session Exports & Default Stamp Quick Config */}
-            <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-              <div className="rounded-2xl border border-[#E5DDFB] bg-white p-5 shadow-[0_10px_28px_rgba(108,60,225,0.05)]">
-                <div className="flex items-center justify-between border-b border-[#EDE7FE] pb-3">
-                  <h2 className="font-display text-base font-extrabold text-[#1E1B4B]">
-                    Session Exported Files
-                  </h2>
-                  <span className="font-mono-tabular text-xs font-semibold text-[#6C3CE1]">
-                    {exportsHistory.length} files
-                  </span>
-                </div>
-
-                {exportsHistory.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-10 text-center">
-                    <FolderOpen className="h-8 w-8 text-[#A78BFA]" />
-                    <p className="mt-2.5 text-sm font-semibold text-[#1E1B4B]">
-                      No PDFs exported in this session yet
-                    </p>
-                    <p className="mt-1 max-w-sm text-xs text-[#645E82]">
-                      Pick any converter or toolkit option above to create and download your first PDF.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="mt-3 divide-y divide-[#F1ECFE]">
-                    {exportsHistory.map((rec) => (
-                      <div
-                        key={rec.id}
-                        className="flex items-center justify-between gap-3 py-2.5"
-                      >
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-[#1E1B4B]">
-                            {rec.filename}
-                          </p>
-                          <p className="font-mono-tabular text-xs text-[#645E82]">
-                            {rec.toolLabel} · {rec.pageCount}p · {formatBytes(rec.sizeBytes)} · {rec.createdAt}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => triggerDownload(rec.url, rec.filename)}
-                          className="inline-flex items-center gap-1.5 rounded-xl bg-[#EDE7FE] px-3 py-1.5 text-xs font-bold text-[#4C1D95] hover:bg-[#6C3CE1] hover:text-white cursor-pointer shrink-0"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>Download</span>
-                        </button>
-                      </div>
-                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoCapture((v) => !v);
+                        setMenuOpen(false);
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
+                    >
+                      <span>Auto-Capture on Lock</span>
+                      <span className="font-mono-tabular text-[11px] text-red-400">
+                        {autoCapture ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFacingMode((f) =>
+                          f === 'environment' ? 'user' : 'environment'
+                        );
+                        setMenuOpen(false);
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
+                    >
+                      <span>Switch Camera</span>
+                      <span className="text-[11px] text-white/60">
+                        {facingMode === 'environment' ? 'Rear' : 'Front'}
+                      </span>
+                    </button>
+                    <div className="my-1 border-t border-white/10" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScanStudioActive(false);
+                        setSection('all-tools');
+                        setMenuOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold text-white/85 hover:bg-white/10 cursor-pointer"
+                    >
+                      <Layers className="h-3.5 w-3.5" />
+                      <span>Back to All-in-One Workspace</span>
+                    </button>
                   </div>
                 )}
               </div>
-
-              <div className="rounded-2xl border border-[#E5DDFB] bg-white p-5 shadow-[0_10px_28px_rgba(108,60,225,0.05)]">
-                <div className="border-b border-[#EDE7FE] pb-3">
-                  <h2 className="font-display text-base font-extrabold text-[#1E1B4B]">
-                    Default Watermark &amp; Stamp
-                  </h2>
-                  <p className="mt-0.5 text-xs text-[#645E82]">
-                    Applied automatically when enabled across tools.
-                  </p>
-                </div>
-
-                <div className="mt-4 space-y-3.5">
-                  <label className="block">
-                    <span className="mb-1 block text-xs font-semibold text-[#645E82]">
-                      Watermark Text
-                    </span>
-                    <input
-                      type="text"
-                      value={exportConfig.watermark.text}
-                      onChange={(e) =>
-                        setExportConfig((prev) => ({
-                          ...prev,
-                          watermark: { ...prev.watermark, text: e.target.value },
-                        }))
-                      }
-                      className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-sm font-medium text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                    />
-                  </label>
-
-                  <div className="flex items-center justify-between rounded-xl border border-[#EDE7FE] bg-[#FAF8FF] px-3.5 py-2.5">
-                    <span className="text-xs font-semibold text-[#1E1B4B]">
-                      Enable Watermark Stamp
-                    </span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={exportConfig.watermark.enabled}
-                      onClick={() =>
-                        setExportConfig((prev) => ({
-                          ...prev,
-                          watermark: {
-                            ...prev.watermark,
-                            enabled: !prev.watermark.enabled,
-                          },
-                        }))
-                      }
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
-                        exportConfig.watermark.enabled
-                          ? 'bg-[#6C3CE1]'
-                          : 'bg-[#DDD6FE]'
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                          exportConfig.watermark.enabled
-                            ? 'translate-x-6'
-                            : 'translate-x-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-xl border border-[#EDE7FE] bg-[#FAF8FF] px-3.5 py-2.5">
-                    <span className="text-xs font-semibold text-[#1E1B4B]">
-                      Include Page Numbers
-                    </span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={exportConfig.pageNumbers.enabled}
-                      onClick={() =>
-                        setExportConfig((prev) => ({
-                          ...prev,
-                          pageNumbers: {
-                            ...prev.pageNumbers,
-                            enabled: !prev.pageNumbers.enabled,
-                          },
-                        }))
-                      }
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
-                        exportConfig.pageNumbers.enabled
-                          ? 'bg-[#6C3CE1]'
-                          : 'bg-[#DDD6FE]'
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                          exportConfig.pageNumbers.enabled
-                            ? 'translate-x-6'
-                            : 'translate-x-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-        )}
-
-        {/* VIEW B: INTERACTIVE 3-COLUMN STUDIO WORKBENCH */}
-        {view !== 'tools' && (
-          <div className="overflow-hidden rounded-3xl border border-[#E2D8FA] bg-white/95 shadow-[0_24px_64px_rgba(76,29,149,0.12)] backdrop-blur-md">
-            {/* Workbench Top Mode Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#EDE7FE] bg-[#FAF8FF] px-5 py-3.5">
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setView('tools')}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#DFD4FC] bg-white px-3 py-2 text-xs font-bold text-[#4C1D95] hover:border-[#6C3CE1] whitespace-nowrap cursor-pointer"
-                >
-                  <LayoutGrid className="h-3.5 w-3.5 text-[#6C3CE1]" />
-                  <span>All Tools</span>
-                </button>
-
-                <div className="flex flex-wrap items-center gap-1 rounded-xl bg-[#EDE7FE] p-1">
-                  {(
-                    [
-                      { id: 'image-scan', label: 'Image & Scan' },
-                      { id: 'pdf-toolkit', label: 'PDF Toolkit' },
-                      { id: 'template-press', label: 'Template & TXT' },
-                    ] as const
-                  ).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setView(item.id)}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
-                        view === item.id
-                          ? 'bg-white text-[#6C3CE1] shadow-sm'
-                          : 'text-[#645E82] hover:text-[#1E1B4B]'
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setCameraOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-xl border border-[#DFD4FC] bg-white px-3.5 py-2 text-xs font-bold text-[#4C1D95] transition-colors hover:border-[#6C3CE1] whitespace-nowrap cursor-pointer"
-                >
-                  <Camera className="h-4 w-4 text-[#6C3CE1]" />
-                  <span>Camera Scan</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handlePrimaryExport}
-                  disabled={!canExport || isExporting}
-                  className="inline-flex items-center gap-2 rounded-xl bg-[#6C3CE1] px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-[#5B21B6] disabled:cursor-not-allowed disabled:opacity-40 whitespace-nowrap cursor-pointer"
-                >
-                  <Download className="h-4 w-4" />
-                  <span>{isExporting ? 'Generating...' : exportLabel}</span>
-                </button>
-              </div>
             </div>
 
-            {/* 3-Column Studio Body */}
-            <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr_290px]">
-              {/* Left Tool & Session Rail */}
-              <aside className="flex flex-col justify-between border-b border-[#EDE7FE] bg-[#FCFAFF] p-4 lg:border-b-0 lg:border-r">
-                <div className="space-y-5">
-                  {view === 'image-scan' && (
-                    <>
-                      <div>
-                        <h3 className="text-xs font-bold text-[#645E82]">
-                          Input Sources
-                        </h3>
-                        <div className="mt-2.5 space-y-2">
-                          <button
-                            type="button"
-                            onClick={() => hiddenImageInputRef.current?.click()}
-                            className="flex w-full items-center gap-2.5 rounded-xl border border-[#E5DDFB] bg-white px-3 py-2.5 text-left text-xs font-semibold text-[#1E1B4B] transition-colors hover:border-[#6C3CE1] cursor-pointer"
-                          >
-                            <ImagePlus className="h-4 w-4 text-[#6C3CE1]" />
-                            <span>Add Image Files</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setCameraOpen(true)}
-                            className="flex w-full items-center gap-2.5 rounded-xl border border-[#E5DDFB] bg-white px-3 py-2.5 text-left text-xs font-semibold text-[#1E1B4B] transition-colors hover:border-[#6C3CE1] cursor-pointer"
-                          >
-                            <Camera className="h-4 w-4 text-[#6C3CE1]" />
-                            <span>Scan via Camera</span>
-                          </button>
-                          <input
-                            ref={hiddenImageInputRef}
-                            type="file"
-                            multiple
-                            accept="image/jpeg,image/jpg,image/png,image/gif,image/bmp,image/webp"
-                            className="hidden"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files.length > 0) {
-                                handleAddImageFiles(e.target.files);
-                              }
-                              e.target.value = '';
-                            }}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="border-t border-[#EDE7FE] pt-4">
-                        <h3 className="text-xs font-bold text-[#645E82]">
-                          Batch Scan Filters
-                        </h3>
-                        <div className="mt-2 space-y-1">
-                          {(
-                            [
-                              { id: 'original', label: 'Original Color' },
-                              { id: 'crisp', label: 'Crisp Document' },
-                              { id: 'mono', label: 'Mono Ink' },
-                            ] as const
-                          ).map((preset) => (
-                            <button
-                              key={preset.id}
-                              type="button"
-                              disabled={images.length === 0}
-                              onClick={() => {
-                                setImages((prev) =>
-                                  prev.map((item) => ({ ...item, filter: preset.id }))
-                                );
-                                notify(
-                                  'success',
-                                  `Applied ${preset.label} to all pages.`
-                                );
-                              }}
-                              className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium text-[#4C456B] hover:bg-[#EDE7FE] hover:text-[#1E1B4B] disabled:opacity-40 cursor-pointer"
-                            >
-                              <span>{preset.label}</span>
-                              <span className="text-[11px] text-[#6C3CE1]">Apply</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  {view === 'pdf-toolkit' && (
-                    <div>
-                      <h3 className="text-xs font-bold text-[#645E82]">
-                        PDF Operations
-                      </h3>
-                      <div className="mt-2.5 space-y-1">
-                        {TOOLKIT_ITEMS.map((tool) => {
-                          const Icon = tool.icon;
-                          const active = activeToolkitTool === tool.id;
-                          return (
-                            <button
-                              key={tool.id}
-                              type="button"
-                              onClick={() => setActiveToolkitTool(tool.id)}
-                              className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold transition-colors cursor-pointer ${
-                                active
-                                  ? 'bg-[#EDE7FE] text-[#4C1D95]'
-                                  : 'text-[#645E82] hover:bg-[#F3EFFE] hover:text-[#1E1B4B]'
-                              }`}
-                            >
-                              <Icon
-                                className={`h-4 w-4 shrink-0 ${
-                                  active ? 'text-[#6C3CE1]' : 'text-[#847DA3]'
-                                }`}
-                              />
-                              <span className="truncate">{tool.label}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {view === 'template-press' && (
-                    <div>
-                      <h3 className="text-xs font-bold text-[#645E82]">
-                        Document Templates
-                      </h3>
-                      <div className="mt-2.5 space-y-1">
-                        {TEMPLATE_ITEMS.map((tpl) => {
-                          const active = templateState.kind === tpl.id;
-                          return (
-                            <button
-                              key={tpl.id}
-                              type="button"
-                              onClick={() =>
-                                setTemplateState(TEMPLATE_PRESETS[tpl.id])
-                              }
-                              className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold transition-colors cursor-pointer ${
-                                active
-                                  ? 'bg-[#EDE7FE] text-[#4C1D95]'
-                                  : 'text-[#645E82] hover:bg-[#F3EFFE] hover:text-[#1E1B4B]'
-                              }`}
-                            >
-                              <FileStack
-                                className={`h-4 w-4 shrink-0 ${
-                                  active ? 'text-[#6C3CE1]' : 'text-[#847DA3]'
-                                }`}
-                              />
-                              <span className="truncate">{tpl.label}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Recent Exports */}
-                <div className="mt-8 border-t border-[#EDE7FE] pt-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xs font-bold text-[#645E82]">
-                      Recent Exports
-                    </h3>
-                    <span className="font-mono-tabular text-[11px] font-semibold text-[#6C3CE1]">
-                      {exportsHistory.length}
-                    </span>
-                  </div>
-                  {exportsHistory.length === 0 ? (
-                    <p className="mt-2 text-xs text-[#847DA3]">
-                      Exported PDFs appear here for instant re-download.
-                    </p>
-                  ) : (
-                    <div className="mt-2.5 space-y-2">
-                      {exportsHistory.slice(0, 4).map((rec) => (
-                        <div
-                          key={rec.id}
-                          className="flex items-center justify-between gap-2 border-b border-[#F1ECFE] pb-2 last:border-b-0"
-                        >
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-[#1E1B4B]">
-                              {rec.filename}
-                            </p>
-                            <p className="font-mono-tabular text-[10px] text-[#645E82]">
-                              {rec.pageCount}p · {formatBytes(rec.sizeBytes)}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => triggerDownload(rec.url, rec.filename)}
-                            aria-label={`Download ${rec.filename}`}
-                            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#EDE7FE] text-[#6C3CE1] hover:bg-[#6C3CE1] hover:text-white cursor-pointer"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </aside>
-
-              {/* Center Workbench Canvas */}
-              <div className="min-h-[560px] bg-[#F5F2FF] p-4 sm:p-6">
-                {/* WORKSPACE 1: IMAGE & SCAN */}
-                {view === 'image-scan' && (
-                  <div
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setIsDraggingImage(true);
-                    }}
-                    onDragLeave={() => setIsDraggingImage(false)}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setIsDraggingImage(false);
-                      if (e.dataTransfer.files.length > 0) {
-                        handleAddImageFiles(e.dataTransfer.files);
+            {/* Clean Step Switcher Strip */}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/40 p-1 backdrop-blur-md">
+                {(
+                  [
+                    { id: 'scan', label: '1. Scan' },
+                    { id: 'edit', label: `2. Edit & Manage (${pages.length})` },
+                    { id: 'finish', label: '3. Finish PDF' },
+                  ] as const
+                ).map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => {
+                      if ((s.id === 'finish' || s.id === 'edit') && pages.length === 0) {
+                        notify('error', 'Scan or choose at least one image first.');
+                        return;
                       }
+                      if (s.id === 'finish') handleGoToFinishPdf();
+                      else setScanStep(s.id);
                     }}
-                    className="flex h-full flex-col justify-between gap-5"
+                    className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
+                      scanStep === s.id
+                        ? isRgbActive || s.id === 'finish'
+                          ? 'bg-gradient-to-r from-rose-500 via-emerald-400 to-cyan-400 text-black'
+                          : 'bg-[#DC2626] text-white shadow-[0_0_14px_rgba(220,38,38,0.55)]'
+                        : 'text-white/65 hover:text-white'
+                    }`}
                   >
-                    {images.length === 0 ? (
-                      <div
-                        className={`flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 text-center transition-colors ${
-                          isDraggingImage
-                            ? 'border-[#6C3CE1] bg-[#EDE7FE]/70'
-                            : 'border-[#D8CCF9] bg-white/80'
-                        }`}
-                      >
-                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#EDE7FE] text-[#6C3CE1]">
-                          <ImagePlus className="h-7 w-7" />
-                        </div>
-                        <h3 className="font-display mt-4 text-xl font-extrabold text-[#1E1B4B]">
-                          Drop images or scan documents
-                        </h3>
-                        <p className="mt-1.5 max-w-md text-sm text-[#645E82]">
-                          Supports JPG, JPEG, PNG, GIF, BMP, and WEBP. Reorder pages, rotate orientation, and export with your ShMp3100 Tool PDFMR stamp.
-                        </p>
-                        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-                          <button
-                            type="button"
-                            onClick={() => hiddenImageInputRef.current?.click()}
-                            className="inline-flex items-center gap-2 rounded-xl bg-[#6C3CE1] px-5 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-[#5B21B6] cursor-pointer"
-                          >
-                            <ImagePlus className="h-4 w-4" />
-                            <span>Browse Images</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setCameraOpen(true)}
-                            className="inline-flex items-center gap-2 rounded-xl border border-[#DFD4FC] bg-white px-5 py-2.5 text-sm font-bold text-[#4C1D95] hover:border-[#6C3CE1] cursor-pointer"
-                          >
-                            <Camera className="h-4 w-4 text-[#6C3CE1]" />
-                            <span>Scan with Camera</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex flex-col items-center gap-4">
-                          {activeImage && (
-                            <div className="flex w-full max-w-[640px] flex-wrap items-center justify-between gap-2 rounded-xl border border-[#E5DDFB] bg-white px-4 py-2.5 text-xs">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span className="font-mono-tabular font-bold text-[#6C3CE1]">
-                                  Page {selectedImageIdx + 1}/{images.length}
-                                </span>
-                                <span className="text-[#C4B5FD]" aria-hidden="true">·</span>
-                                <span className="truncate font-semibold text-[#1E1B4B]">
-                                  {activeImage.fileName}
-                                </span>
-                                <span className="font-mono-tabular hidden text-[#645E82] sm:inline">
-                                  · {formatBytes(activeImage.sizeBytes)}
-                                </span>
-                              </div>
-
-                              <div className="flex items-center gap-2">
-                                <div className="flex items-center gap-1 rounded-lg bg-[#F3EFFE] p-0.5">
-                                  {(
-                                    [
-                                      { id: 'original', label: 'Raw' },
-                                      { id: 'crisp', label: 'Crisp' },
-                                      { id: 'mono', label: 'Mono' },
-                                    ] as const
-                                  ).map((f) => (
-                                    <button
-                                      key={f.id}
-                                      type="button"
-                                      onClick={() =>
-                                        setImages((prev) =>
-                                          prev.map((item) =>
-                                            item.id === activeImage.id
-                                              ? { ...item, filter: f.id }
-                                              : item
-                                          )
-                                        )
-                                      }
-                                      className={`rounded-md px-2.5 py-1 text-[11px] font-semibold cursor-pointer ${
-                                        activeImage.filter === f.id
-                                          ? 'bg-white text-[#6C3CE1] shadow-sm'
-                                          : 'text-[#645E82] hover:text-[#1E1B4B]'
-                                      }`}
-                                    >
-                                      {f.label}
-                                    </button>
-                                  ))}
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setImages((prev) =>
-                                      prev.map((item) =>
-                                        item.id === activeImage.id
-                                          ? {
-                                              ...item,
-                                              rotation: (((item.rotation + 90) %
-                                                360) as 0 | 90 | 180 | 270),
-                                            }
-                                          : item
-                                      )
-                                    )
-                                  }
-                                  aria-label="Rotate image 90 degrees"
-                                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#E5DDFB] bg-white text-[#4C1D95] hover:border-[#6C3CE1] cursor-pointer"
-                                >
-                                  <RotateCw className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {activeImage && (
-                            <div
-                              className={`paper-preview-sheet relative flex w-full items-center justify-center overflow-hidden rounded-sm transition-all ${sheetAspectClass} ${marginPaddingClass}`}
-                            >
-                              <img
-                                src={activeImage.previewUrl}
-                                alt={activeImage.fileName}
-                                className="max-h-full max-w-full object-contain transition-transform"
-                                style={{
-                                  transform: `rotate(${activeImage.rotation}deg)`,
-                                  filter: getFilterCss(activeImage.filter),
-                                }}
-                              />
-
-                              {exportConfig.watermark.enabled &&
-                                exportConfig.watermark.text.trim() && (
-                                  <div
-                                    aria-hidden="true"
-                                    className="pointer-events-none absolute inset-0 flex items-center justify-center"
-                                    style={{ opacity: exportConfig.watermark.opacity }}
-                                  >
-                                    {exportConfig.watermark.placement === 'diagonal' ? (
-                                      <span className="rotate-[-32deg] select-none font-display text-2xl font-extrabold text-[#6C3CE1]">
-                                        {exportConfig.watermark.text}
-                                      </span>
-                                    ) : (
-                                      <span className="absolute bottom-2.5 left-4 text-[10px] font-bold text-[#6C3CE1]">
-                                        {exportConfig.watermark.text}
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-
-                              {exportConfig.pageNumbers.enabled && (
-                                <span
-                                  className={`font-mono-tabular pointer-events-none absolute bottom-2.5 text-[10px] text-[#645E82] ${
-                                    exportConfig.pageNumbers.position === 'bottom-center'
-                                      ? 'left-1/2 -translate-x-1/2'
-                                      : 'right-4'
-                                  }`}
-                                >
-                                  {selectedImageIdx + 1} / {images.length}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Page Filmstrip */}
-                        <div className="rounded-2xl border border-[#E5DDFB] bg-white p-3">
-                          <div className="mb-2.5 flex items-center justify-between">
-                            <span className="text-xs font-bold text-[#1E1B4B]">
-                              Page Sequence ({images.length})
-                            </span>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => hiddenImageInputRef.current?.click()}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-[#E5DDFB] bg-[#FAF8FF] px-2.5 py-1.5 text-xs font-semibold text-[#4C1D95] hover:border-[#6C3CE1] cursor-pointer"
-                              >
-                                <ImagePlus className="h-3.5 w-3.5" />
-                                <span>Add</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  images.forEach((img) => {
-                                    if (img.previewUrl.startsWith('blob:')) {
-                                      URL.revokeObjectURL(img.previewUrl);
-                                    }
-                                  });
-                                  setImages([]);
-                                  setSelectedImageIdx(0);
-                                }}
-                                className="text-xs font-semibold text-[#DC2626] hover:underline cursor-pointer"
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="flex gap-2.5 overflow-x-auto pb-1">
-                            {images.map((item, idx) => {
-                              const selected = idx === selectedImageIdx;
-                              return (
-                                <div
-                                  key={item.id}
-                                  onClick={() => setSelectedImageIdx(idx)}
-                                  role="button"
-                                  tabIndex={0}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter' || e.key === ' ') {
-                                      e.preventDefault();
-                                      setSelectedImageIdx(idx);
-                                    }
-                                  }}
-                                  className={`flex w-28 shrink-0 cursor-pointer flex-col rounded-xl border p-1.5 transition-colors ${
-                                    selected
-                                      ? 'border-[#6C3CE1] bg-[#F3EFFE]'
-                                      : 'border-[#E5DDFB] bg-[#FAF8FF] hover:border-[#C4B5FD]'
-                                  }`}
-                                >
-                                  <div className="relative h-24 w-full overflow-hidden rounded-lg bg-white">
-                                    <img
-                                      src={item.previewUrl}
-                                      alt={item.fileName}
-                                      className="h-full w-full object-contain"
-                                      style={{
-                                        transform: `rotate(${item.rotation}deg)`,
-                                        filter: getFilterCss(item.filter),
-                                      }}
-                                    />
-                                    <span className="font-mono-tabular absolute left-1 top-1 rounded bg-[#1E1B4B]/80 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                                      {idx + 1}
-                                    </span>
-                                  </div>
-                                  <div className="mt-1.5 flex items-center justify-between">
-                                    <div className="flex items-center gap-0.5">
-                                      <button
-                                        type="button"
-                                        disabled={idx === 0}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setImages((prev) => {
-                                            const next = [...prev];
-                                            const [moved] = next.splice(idx, 1);
-                                            next.splice(idx - 1, 0, moved);
-                                            return next;
-                                          });
-                                          setSelectedImageIdx(idx - 1);
-                                        }}
-                                        aria-label={`Move page ${idx + 1} left`}
-                                        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#645E82] hover:bg-white disabled:opacity-30 cursor-pointer"
-                                      >
-                                        <ArrowLeft className="h-3 w-3" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        disabled={idx === images.length - 1}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setImages((prev) => {
-                                            const next = [...prev];
-                                            const [moved] = next.splice(idx, 1);
-                                            next.splice(idx + 1, 0, moved);
-                                            return next;
-                                          });
-                                          setSelectedImageIdx(idx + 1);
-                                        }}
-                                        aria-label={`Move page ${idx + 1} right`}
-                                        className="inline-flex h-6 w-6 items-center justify-center rounded text-[#645E82] hover:bg-white disabled:opacity-30 cursor-pointer"
-                                      >
-                                        <ArrowRight className="h-3 w-3" />
-                                      </button>
-                                    </div>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (item.previewUrl.startsWith('blob:')) {
-                                          URL.revokeObjectURL(item.previewUrl);
-                                        }
-                                        const next = images.filter((i) => i.id !== item.id);
-                                        setImages(next);
-                                        setSelectedImageIdx(
-                                          Math.max(0, Math.min(selectedImageIdx, next.length - 1))
-                                        );
-                                      }}
-                                      aria-label={`Delete page ${idx + 1}`}
-                                      className="inline-flex h-6 w-6 items-center justify-center rounded text-[#847DA3] hover:text-[#DC2626] cursor-pointer"
-                                    >
-                                      <Trash2 className="h-3 w-3" />
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {/* WORKSPACE 2: PDF TOOLKIT */}
-                {view === 'pdf-toolkit' && (
-                  <div className="grid h-full gap-5 xl:grid-cols-[1.15fr_0.85fr]">
-                    <div className="space-y-4">
-                      <div
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          setIsDraggingPdf(true);
-                        }}
-                        onDragLeave={() => setIsDraggingPdf(false)}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          setIsDraggingPdf(false);
-                          if (e.dataTransfer.files.length > 0) {
-                            handleAddPdfFiles(e.dataTransfer.files);
-                          }
-                        }}
-                        className={`flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-8 text-center transition-colors ${
-                          isDraggingPdf
-                            ? 'border-[#6C3CE1] bg-[#EDE7FE]/70'
-                            : 'border-[#D8CCF9] bg-white'
-                        }`}
-                      >
-                        <FilePlus2 className="h-7 w-7 text-[#6C3CE1]" />
-                        <p className="mt-2 text-sm font-bold text-[#1E1B4B]">
-                          {activeToolkitTool === 'merge'
-                            ? 'Drop 2 or more PDF files to merge'
-                            : 'Drop a PDF file to process'}
-                        </p>
-                        <p className="mt-1 text-xs text-[#645E82]">
-                          Processed locally via pdf-lib · Instant download
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => toolkitPdfInputRef.current?.click()}
-                          className="mt-4 rounded-xl bg-[#6C3CE1] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
-                        >
-                          Select PDF {activeToolkitTool === 'merge' ? 'Files' : 'File'}
-                        </button>
-                        <input
-                          ref={toolkitPdfInputRef}
-                          type="file"
-                          accept="application/pdf,.pdf"
-                          multiple={activeToolkitTool === 'merge'}
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files && e.target.files.length > 0) {
-                              handleAddPdfFiles(e.target.files);
-                            }
-                            e.target.value = '';
-                          }}
-                        />
-                      </div>
-
-                      {activeToolkitTool === 'split' && (
-                        <div className="rounded-2xl border border-[#E5DDFB] bg-white p-4">
-                          <label className="block">
-                            <span className="mb-1.5 block text-xs font-bold text-[#1E1B4B]">
-                              Page Range to Extract
-                            </span>
-                            <input
-                              type="text"
-                              value={splitRange}
-                              onChange={(e) => setSplitRange(e.target.value)}
-                              placeholder="e.g. 1-3, 5"
-                              className="font-mono-tabular w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-sm text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                            />
-                          </label>
-                        </div>
-                      )}
-
-                      {activeToolkitTool === 'rotate' && (
-                        <div className="space-y-3 rounded-2xl border border-[#E5DDFB] bg-white p-4">
-                          <div>
-                            <span className="mb-1.5 block text-xs font-bold text-[#1E1B4B]">
-                              Clockwise Angle
-                            </span>
-                            <div className="grid grid-cols-3 gap-2">
-                              {([90, 180, 270] as const).map((deg) => (
-                                <button
-                                  key={deg}
-                                  type="button"
-                                  onClick={() => setRotateDegrees(deg)}
-                                  className={`rounded-xl border py-2 text-xs font-bold cursor-pointer ${
-                                    rotateDegrees === deg
-                                      ? 'border-[#6C3CE1] bg-[#EDE7FE] text-[#4C1D95]'
-                                      : 'border-[#E5DDFB] bg-[#FAF8FF] text-[#645E82]'
-                                  }`}
-                                >
-                                  {deg}°
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <label className="block">
-                            <span className="mb-1 block text-xs font-bold text-[#1E1B4B]">
-                              Target Pages (optional)
-                            </span>
-                            <input
-                              type="text"
-                              value={rotateRange}
-                              onChange={(e) => setRotateRange(e.target.value)}
-                              placeholder="All pages (or e.g. 1, 3-4)"
-                              className="font-mono-tabular w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                            />
-                          </label>
-                        </div>
-                      )}
-
-                      {activeToolkitTool === 'metadata' && (
-                        <div className="grid gap-3 rounded-2xl border border-[#E5DDFB] bg-white p-4 sm:grid-cols-2">
-                          <label className="block">
-                            <span className="mb-1 block text-xs font-bold text-[#1E1B4B]">
-                              Document Title
-                            </span>
-                            <input
-                              type="text"
-                              value={metaTitle}
-                              onChange={(e) => setMetaTitle(e.target.value)}
-                              className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                            />
-                          </label>
-                          <label className="block">
-                            <span className="mb-1 block text-xs font-bold text-[#1E1B4B]">
-                              Author
-                            </span>
-                            <input
-                              type="text"
-                              value={metaAuthor}
-                              onChange={(e) => setMetaAuthor(e.target.value)}
-                              className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                            />
-                          </label>
-                        </div>
-                      )}
-
-                      {pdfFiles.length > 0 && (
-                        <div className="space-y-2">
-                          {pdfFiles.map((item, idx) => (
-                            <div
-                              key={item.id}
-                              className="flex items-center justify-between gap-3 rounded-xl border border-[#E5DDFB] bg-white px-3.5 py-2.5"
-                            >
-                              <div className="flex min-w-0 items-center gap-3">
-                                <FileText className="h-4 w-4 shrink-0 text-[#6C3CE1]" />
-                                <div className="min-w-0">
-                                  <p className="truncate text-xs font-bold text-[#1E1B4B]">
-                                    {item.fileName}
-                                  </p>
-                                  <p className="font-mono-tabular text-[11px] text-[#645E82]">
-                                    {item.pageCount}p · {formatBytes(item.sizeBytes)}
-                                  </p>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                {activeToolkitTool === 'merge' && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={idx === 0}
-                                      onClick={() =>
-                                        setPdfFiles((prev) => {
-                                          const next = [...prev];
-                                          const [m] = next.splice(idx, 1);
-                                          next.splice(idx - 1, 0, m);
-                                          return next;
-                                        })
-                                      }
-                                      aria-label="Move PDF up"
-                                      className="inline-flex h-7 w-7 items-center justify-center rounded text-[#645E82] hover:bg-[#F3EFFE] disabled:opacity-30 cursor-pointer"
-                                    >
-                                      <ArrowUp className="h-3.5 w-3.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={idx === pdfFiles.length - 1}
-                                      onClick={() =>
-                                        setPdfFiles((prev) => {
-                                          const next = [...prev];
-                                          const [m] = next.splice(idx, 1);
-                                          next.splice(idx + 1, 0, m);
-                                          return next;
-                                        })
-                                      }
-                                      aria-label="Move PDF down"
-                                      className="inline-flex h-7 w-7 items-center justify-center rounded text-[#645E82] hover:bg-[#F3EFFE] disabled:opacity-30 cursor-pointer"
-                                    >
-                                      <ArrowDown className="h-3.5 w-3.5" />
-                                    </button>
-                                  </>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setPdfFiles((prev) =>
-                                      prev.filter((p) => p.id !== item.id)
-                                    )
-                                  }
-                                  aria-label={`Remove ${item.fileName}`}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded text-[#847DA3] hover:text-[#DC2626] cursor-pointer"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* PDF Blueprint Preview Sheet */}
-                    <div className="flex items-start justify-center">
-                      <div className="paper-preview-sheet relative flex aspect-[1/1.414] w-full max-w-[350px] flex-col justify-between overflow-hidden rounded-sm p-6">
-                        <div>
-                          <div className="flex items-center justify-between border-b border-[#EDE7FE] pb-2.5">
-                            <span className="font-mono-tabular text-[10px] font-bold text-[#645E82]">
-                              PDF BLUEPRINT
-                            </span>
-                            <span className="font-mono-tabular text-[10px] font-bold text-[#6C3CE1]">
-                              {activeToolkitTool.toUpperCase()}
-                            </span>
-                          </div>
-                          {pdfFiles.length === 0 ? (
-                            <div className="mt-20 text-center">
-                              <p className="font-display text-base font-bold text-[#1E1B4B]">
-                                Awaiting PDF File
-                              </p>
-                              <p className="mt-1 text-xs text-[#645E82]">
-                                Upload a PDF on the left to inspect page counts and apply edits.
-                              </p>
-                            </div>
-                          ) : (
-                            <div className="mt-4 space-y-2.5 text-xs">
-                              <div className="flex justify-between">
-                                <span className="text-[#645E82]">Loaded Files</span>
-                                <span className="font-mono-tabular font-bold">
-                                  {pdfFiles.length}
-                                </span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-[#645E82]">Total Pages</span>
-                                <span className="font-mono-tabular font-bold">
-                                  {totalToolkitPages}
-                                </span>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-
-                        {exportConfig.watermark.enabled &&
-                          exportConfig.watermark.text.trim() && (
-                            <div
-                              aria-hidden="true"
-                              className="pointer-events-none absolute inset-0 flex items-center justify-center"
-                              style={{ opacity: exportConfig.watermark.opacity }}
-                            >
-                              {exportConfig.watermark.placement === 'diagonal' ? (
-                                <span className="rotate-[-32deg] font-display text-xl font-extrabold text-[#6C3CE1]">
-                                  {exportConfig.watermark.text}
-                                </span>
-                              ) : (
-                                <span className="absolute bottom-3 left-5 text-[9px] font-bold text-[#6C3CE1]">
-                                  {exportConfig.watermark.text}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* WORKSPACE 3: TEMPLATE & TXT PRESS */}
-                {view === 'template-press' && (
-                  <div className="grid h-full gap-5 xl:grid-cols-[310px_1fr]">
-                    <div className="space-y-3 rounded-2xl border border-[#E5DDFB] bg-white p-4">
-                      <h3 className="font-display text-sm font-extrabold text-[#1E1B4B]">
-                        Document Fields
-                      </h3>
-                      <label className="block">
-                        <span className="mb-1 block text-[11px] font-semibold text-[#645E82]">
-                          Title
-                        </span>
-                        <input
-                          type="text"
-                          value={templateState.title}
-                          onChange={(e) =>
-                            setTemplateState({
-                              ...templateState,
-                              title: e.target.value,
-                            })
-                          }
-                          className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-1.5 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="mb-1 block text-[11px] font-semibold text-[#645E82]">
-                          Subtitle
-                        </span>
-                        <input
-                          type="text"
-                          value={templateState.subtitle}
-                          onChange={(e) =>
-                            setTemplateState({
-                              ...templateState,
-                              subtitle: e.target.value,
-                            })
-                          }
-                          className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-1.5 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                        />
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <label className="block">
-                          <span className="mb-1 block text-[11px] font-semibold text-[#645E82]">
-                            From
-                          </span>
-                          <input
-                            type="text"
-                            value={templateState.senderName}
-                            onChange={(e) =>
-                              setTemplateState({
-                                ...templateState,
-                                senderName: e.target.value,
-                              })
-                            }
-                            className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-2.5 py-1.5 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-[11px] font-semibold text-[#645E82]">
-                            To
-                          </span>
-                          <input
-                            type="text"
-                            value={templateState.recipientName}
-                            onChange={(e) =>
-                              setTemplateState({
-                                ...templateState,
-                                recipientName: e.target.value,
-                              })
-                            }
-                            className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-2.5 py-1.5 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                          />
-                        </label>
-                      </div>
-
-                      {templateState.kind === 'invoice' && (
-                        <div className="space-y-2 border-t border-[#EDE7FE] pt-2.5">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] font-bold text-[#1E1B4B]">
-                              Line Items
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setTemplateState({
-                                  ...templateState,
-                                  lineItems: [
-                                    ...templateState.lineItems,
-                                    {
-                                      id: `li-${Date.now()}`,
-                                      description: 'Additional Item',
-                                      qty: 1,
-                                      rate: 100,
-                                    },
-                                  ],
-                                })
-                              }
-                              className="inline-flex items-center gap-1 text-[11px] font-bold text-[#6C3CE1] cursor-pointer"
-                            >
-                              <Plus className="h-3 w-3" />
-                              <span>Add</span>
-                            </button>
-                          </div>
-                          {templateState.lineItems.map((row) => (
-                            <div
-                              key={row.id}
-                              className="grid grid-cols-[1fr_44px_56px_24px] items-center gap-1"
-                            >
-                              <input
-                                type="text"
-                                value={row.description}
-                                onChange={(e) =>
-                                  setTemplateState({
-                                    ...templateState,
-                                    lineItems: templateState.lineItems.map((li) =>
-                                      li.id === row.id
-                                        ? { ...li, description: e.target.value }
-                                        : li
-                                    ),
-                                  })
-                                }
-                                className="rounded border border-[#DFD4FC] bg-[#FAF8FF] px-2 py-1 text-[11px] text-[#1E1B4B]"
-                              />
-                              <input
-                                type="number"
-                                min={1}
-                                value={row.qty}
-                                onChange={(e) =>
-                                  setTemplateState({
-                                    ...templateState,
-                                    lineItems: templateState.lineItems.map((li) =>
-                                      li.id === row.id
-                                        ? {
-                                            ...li,
-                                            qty: Math.max(
-                                              1,
-                                              Number(e.target.value) || 1
-                                            ),
-                                          }
-                                        : li
-                                    ),
-                                  })
-                                }
-                                className="font-mono-tabular rounded border border-[#DFD4FC] bg-[#FAF8FF] px-1.5 py-1 text-right text-[11px]"
-                              />
-                              <input
-                                type="number"
-                                min={0}
-                                value={row.rate}
-                                onChange={(e) =>
-                                  setTemplateState({
-                                    ...templateState,
-                                    lineItems: templateState.lineItems.map((li) =>
-                                      li.id === row.id
-                                        ? {
-                                            ...li,
-                                            rate: Math.max(
-                                              0,
-                                              Number(e.target.value) || 0
-                                            ),
-                                          }
-                                        : li
-                                    ),
-                                  })
-                                }
-                                className="font-mono-tabular rounded border border-[#DFD4FC] bg-[#FAF8FF] px-1.5 py-1 text-right text-[11px]"
-                              />
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setTemplateState({
-                                    ...templateState,
-                                    lineItems: templateState.lineItems.filter(
-                                      (li) => li.id !== row.id
-                                    ),
-                                  })
-                                }
-                                aria-label="Remove item"
-                                className="inline-flex h-6 w-6 items-center justify-center text-[#847DA3] hover:text-[#DC2626] cursor-pointer"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      <label className="block">
-                        <span className="mb-1 block text-[11px] font-semibold text-[#645E82]">
-                          {templateState.kind === 'invoice' ? 'Notes' : 'Body Copy'}
-                        </span>
-                        <textarea
-                          rows={5}
-                          value={templateState.bodyText}
-                          onChange={(e) =>
-                            setTemplateState({
-                              ...templateState,
-                              bodyText: e.target.value,
-                            })
-                          }
-                          className="w-full rounded-xl border border-[#DFD4FC] bg-[#FAF8FF] px-3 py-2 text-xs leading-relaxed text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                        />
-                      </label>
-                    </div>
-
-                    {/* Live Template Sheet */}
-                    <div className="flex items-start justify-center">
-                      <div
-                        className={`paper-preview-sheet relative w-full overflow-hidden rounded-sm p-8 ${
-                          templateState.kind === 'certificate'
-                            ? 'max-w-[620px] aspect-[1.414/1]'
-                            : 'max-w-[500px] min-h-[640px]'
-                        }`}
-                      >
-                        {templateState.kind === 'certificate' ? (
-                          <div className="flex h-full flex-col justify-between border-2 border-[#6C3CE1] p-6 text-center">
-                            <div className="space-y-2.5 pt-2">
-                              <p className="text-[11px] font-bold tracking-widest text-[#6C3CE1]">
-                                {templateState.subtitle.toUpperCase()}
-                              </p>
-                              <h3 className="font-display text-2xl font-extrabold text-[#1E1B4B]">
-                                {templateState.title}
-                              </h3>
-                              <p className="pt-1 text-xs text-[#645E82]">
-                                Presented to
-                              </p>
-                              <p className="font-display text-2xl font-bold text-[#1E1B4B]">
-                                {templateState.recipientName}
-                              </p>
-                              <div className="mx-auto h-[2px] w-32 bg-[#6C3CE1]" />
-                              <p className="mx-auto max-w-md pt-2 text-xs leading-relaxed text-[#4C456B]">
-                                {templateState.bodyText}
-                              </p>
-                            </div>
-                            <div className="flex justify-between px-4 pb-2 text-[11px] text-[#645E82]">
-                              <span className="border-t border-[#C4B5FD] pt-1">
-                                {templateState.dateText}
-                              </span>
-                              <span className="border-t border-[#C4B5FD] pt-1 font-bold text-[#1E1B4B]">
-                                {templateState.signatureName}
-                              </span>
-                            </div>
-                          </div>
-                        ) : templateState.kind === 'invoice' ? (
-                          <div>
-                            <div className="-mx-8 -mt-8 mb-6 flex items-center justify-between bg-[#6C3CE1] px-8 py-5 text-white">
-                              <div>
-                                <h3 className="font-display text-lg font-extrabold">
-                                  {templateState.title}
-                                </h3>
-                                <p className="font-mono-tabular text-xs text-[#E9E2FF]">
-                                  {templateState.referenceCode}
-                                </p>
-                              </div>
-                              <div className="text-right text-xs">
-                                <p className="font-bold">
-                                  {templateState.senderName}
-                                </p>
-                                <p className="text-[#E9E2FF]">
-                                  {templateState.dateText}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="mb-5">
-                              <p className="text-[10px] font-bold text-[#645E82]">
-                                BILL TO
-                              </p>
-                              <p className="text-sm font-bold text-[#1E1B4B]">
-                                {templateState.recipientName}
-                              </p>
-                            </div>
-                            <table className="w-full text-left text-xs">
-                              <thead>
-                                <tr className="bg-[#F3EFFE] text-[10px] font-bold text-[#4C1D95]">
-                                  <th className="px-2 py-2">ITEM</th>
-                                  <th className="px-2 py-2 text-right">QTY</th>
-                                  <th className="px-2 py-2 text-right">RATE</th>
-                                  <th className="px-2 py-2 text-right">AMOUNT</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {templateState.lineItems.map((row) => (
-                                  <tr
-                                    key={row.id}
-                                    className="border-b border-[#F1ECFE]"
-                                  >
-                                    <td className="px-2 py-2">
-                                      {row.description}
-                                    </td>
-                                    <td className="font-mono-tabular px-2 py-2 text-right">
-                                      {row.qty}
-                                    </td>
-                                    <td className="font-mono-tabular px-2 py-2 text-right">
-                                      {templateState.currency}
-                                      {row.rate.toFixed(2)}
-                                    </td>
-                                    <td className="font-mono-tabular px-2 py-2 text-right font-bold">
-                                      {templateState.currency}
-                                      {(row.qty * row.rate).toFixed(2)}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                            <div className="mt-4 flex justify-end gap-5 text-sm font-extrabold">
-                              <span className="text-[#6C3CE1]">TOTAL</span>
-                              <span className="font-mono-tabular">
-                                {templateState.currency}
-                                {totalInvoiceAmount.toFixed(2)}
-                              </span>
-                            </div>
-                            <p className="mt-6 text-xs text-[#645E82]">
-                              {templateState.bodyText}
-                            </p>
-                          </div>
-                        ) : (
-                          <div>
-                            <p className="text-[10px] font-bold tracking-widest text-[#6C3CE1]">
-                              {templateState.subtitle.toUpperCase()}
-                            </p>
-                            <h3 className="font-display mt-1.5 text-2xl font-extrabold text-[#1E1B4B]">
-                              {templateState.title}
-                            </h3>
-                            <p className="mt-2 border-b border-[#EDE7FE] pb-3 text-xs text-[#645E82]">
-                              {[
-                                templateState.senderName,
-                                templateState.recipientName,
-                                templateState.dateText,
-                              ]
-                                .filter(Boolean)
-                                .join(' · ')}
-                            </p>
-                            <div className="mt-5 whitespace-pre-line text-xs leading-relaxed text-[#1E1B4B]">
-                              {templateState.bodyText}
-                            </div>
-                          </div>
-                        )}
-
-                        {exportConfig.watermark.enabled &&
-                          exportConfig.watermark.text.trim() && (
-                            <div
-                              aria-hidden="true"
-                              className="pointer-events-none absolute inset-0 flex items-center justify-center"
-                              style={{ opacity: exportConfig.watermark.opacity }}
-                            >
-                              {exportConfig.watermark.placement === 'diagonal' ? (
-                                <span className="rotate-[-32deg] font-display text-2xl font-extrabold text-[#6C3CE1]">
-                                  {exportConfig.watermark.text}
-                                </span>
-                              ) : (
-                                <span className="absolute bottom-3 left-6 text-[10px] font-bold text-[#6C3CE1]">
-                                  {exportConfig.watermark.text}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                    {s.label}
+                  </button>
+                ))}
               </div>
 
-              {/* Right Print & Watermark Inspector Rail */}
-              <aside className="flex flex-col justify-between border-t border-[#EDE7FE] bg-[#FCFAFF] p-4 lg:border-l lg:border-t-0">
-                <div className="space-y-4">
-                  <div className="border-b border-[#EDE7FE] pb-3">
-                    <h3 className="font-display text-sm font-extrabold text-[#1E1B4B]">
-                      Print &amp; Stamp Inspector
-                    </h3>
-                    <p className="mt-0.5 text-xs text-[#645E82]">
-                      Configure output format and watermark stamp.
-                    </p>
-                  </div>
-
-                  <label className="block">
-                    <span className="mb-1 block text-xs font-semibold text-[#645E82]">
-                      Filename
-                    </span>
-                    <div className="flex items-center rounded-xl border border-[#DFD4FC] bg-white focus-within:border-[#6C3CE1]">
-                      <input
-                        type="text"
-                        value={exportConfig.filename}
-                        onChange={(e) =>
-                          setExportConfig((prev) => ({
-                            ...prev,
-                            filename: e.target.value,
-                          }))
-                        }
-                        className="w-full bg-transparent px-3 py-2 text-xs font-semibold text-[#1E1B4B] focus:outline-none"
-                      />
-                      <span className="font-mono-tabular pr-3 text-xs text-[#847DA3]">
-                        .pdf
-                      </span>
-                    </div>
-                  </label>
-
-                  {view !== 'pdf-toolkit' && (
-                    <div className="space-y-3 border-t border-[#EDE7FE] pt-3">
-                      <div>
-                        <span className="mb-1.5 block text-xs font-semibold text-[#645E82]">
-                          Page Size
-                        </span>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {(
-                            [
-                              { id: 'a4', label: 'A4' },
-                              { id: 'letter', label: 'Letter' },
-                              ...(view === 'image-scan'
-                                ? [{ id: 'fit', label: 'Fit' }]
-                                : []),
-                            ] as { id: PageSizeOption; label: string }[]
-                          ).map((s) => (
-                            <button
-                              key={s.id}
-                              type="button"
-                              onClick={() =>
-                                setExportConfig((prev) => ({
-                                  ...prev,
-                                  pageSize: s.id,
-                                }))
-                              }
-                              className={`rounded-lg border py-1.5 text-xs font-bold cursor-pointer ${
-                                exportConfig.pageSize === s.id
-                                  ? 'border-[#6C3CE1] bg-[#EDE7FE] text-[#4C1D95]'
-                                  : 'border-[#E5DDFB] bg-white text-[#645E82]'
-                              }`}
-                            >
-                              {s.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {view === 'image-scan' && exportConfig.pageSize !== 'fit' && (
-                        <div>
-                          <span className="mb-1.5 block text-xs font-semibold text-[#645E82]">
-                            Orientation
-                          </span>
-                          <div className="grid grid-cols-2 gap-1.5">
-                            {(
-                              [
-                                { id: 'portrait', label: 'Portrait' },
-                                { id: 'landscape', label: 'Landscape' },
-                              ] as { id: OrientationOption; label: string }[]
-                            ).map((o) => (
-                              <button
-                                key={o.id}
-                                type="button"
-                                onClick={() =>
-                                  setExportConfig((prev) => ({
-                                    ...prev,
-                                    orientation: o.id,
-                                  }))
-                                }
-                                className={`rounded-lg border py-1.5 text-xs font-bold cursor-pointer ${
-                                  exportConfig.orientation === o.id
-                                    ? 'border-[#6C3CE1] bg-[#EDE7FE] text-[#4C1D95]'
-                                    : 'border-[#E5DDFB] bg-white text-[#645E82]'
-                                }`}
-                              >
-                                {o.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {view === 'image-scan' && (
-                        <div>
-                          <span className="mb-1.5 block text-xs font-semibold text-[#645E82]">
-                            Margins
-                          </span>
-                          <div className="grid grid-cols-3 gap-1.5">
-                            {(
-                              [
-                                { id: 'none', label: 'None' },
-                                { id: 'compact', label: 'Compact' },
-                                { id: 'standard', label: 'Standard' },
-                              ] as { id: MarginOption; label: string }[]
-                            ).map((m) => (
-                              <button
-                                key={m.id}
-                                type="button"
-                                onClick={() =>
-                                  setExportConfig((prev) => ({
-                                    ...prev,
-                                    margin: m.id,
-                                  }))
-                                }
-                                className={`rounded-lg border py-1.5 text-xs font-bold cursor-pointer ${
-                                  exportConfig.margin === m.id
-                                    ? 'border-[#6C3CE1] bg-[#EDE7FE] text-[#4C1D95]'
-                                    : 'border-[#E5DDFB] bg-white text-[#645E82]'
-                                }`}
-                              >
-                                {m.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="space-y-3 border-t border-[#EDE7FE] pt-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[#1E1B4B]">
-                        Watermark Stamp
-                      </span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={exportConfig.watermark.enabled}
-                        onClick={() =>
-                          setExportConfig((prev) => ({
-                            ...prev,
-                            watermark: {
-                              ...prev.watermark,
-                              enabled: !prev.watermark.enabled,
-                            },
-                          }))
-                        }
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
-                          exportConfig.watermark.enabled
-                            ? 'bg-[#6C3CE1]'
-                            : 'bg-[#DDD6FE]'
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            exportConfig.watermark.enabled
-                              ? 'translate-x-6'
-                              : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
-                    </div>
-
-                    {exportConfig.watermark.enabled && (
-                      <div className="space-y-2.5">
-                        <input
-                          type="text"
-                          value={exportConfig.watermark.text}
-                          onChange={(e) =>
-                            setExportConfig((prev) => ({
-                              ...prev,
-                              watermark: { ...prev.watermark, text: e.target.value },
-                            }))
-                          }
-                          className="w-full rounded-xl border border-[#DFD4FC] bg-white px-3 py-1.5 text-xs text-[#1E1B4B] focus:border-[#6C3CE1] focus:outline-none"
-                        />
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {(['diagonal', 'footer'] as const).map((place) => (
-                            <button
-                              key={place}
-                              type="button"
-                              onClick={() =>
-                                setExportConfig((prev) => ({
-                                  ...prev,
-                                  watermark: { ...prev.watermark, placement: place },
-                                }))
-                              }
-                              className={`rounded-lg border py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                                exportConfig.watermark.placement === place
-                                  ? 'border-[#6C3CE1] bg-[#EDE7FE] text-[#4C1D95]'
-                                  : 'border-[#E5DDFB] bg-white text-[#645E82]'
-                              }`}
-                            >
-                              {place}
-                            </button>
-                          ))}
-                        </div>
-                        <div>
-                          <div className="mb-1 flex justify-between text-[11px] text-[#645E82]">
-                            <span>Opacity</span>
-                            <span className="font-mono-tabular font-bold text-[#1E1B4B]">
-                              {Math.round(exportConfig.watermark.opacity * 100)}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={0.08}
-                            max={0.6}
-                            step={0.02}
-                            value={exportConfig.watermark.opacity}
-                            onChange={(e) =>
-                              setExportConfig((prev) => ({
-                                ...prev,
-                                watermark: {
-                                  ...prev.watermark,
-                                  opacity: Number(e.target.value),
-                                },
-                              }))
-                            }
-                            className="w-full accent-[#6C3CE1] cursor-pointer"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex items-center justify-between border-t border-[#EDE7FE] pt-3">
-                    <span className="text-xs font-bold text-[#1E1B4B]">
-                      Page Numbers
-                    </span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={exportConfig.pageNumbers.enabled}
-                      onClick={() =>
-                        setExportConfig((prev) => ({
-                          ...prev,
-                          pageNumbers: {
-                            ...prev.pageNumbers,
-                            enabled: !prev.pageNumbers.enabled,
-                          },
-                        }))
-                      }
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
-                        exportConfig.pageNumbers.enabled
-                          ? 'bg-[#6C3CE1]'
-                          : 'bg-[#DDD6FE]'
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                          exportConfig.pageNumbers.enabled
-                            ? 'translate-x-6'
-                            : 'translate-x-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-6 border-t border-[#EDE7FE] pt-4">
+              {pages.length > 0 && scanStep === 'scan' && (
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={handlePrimaryExport}
-                    disabled={!canExport || isExporting}
-                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#6C3CE1] px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#5B21B6] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                    onClick={() => setScanStep('edit')}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-white/10 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-white/15 cursor-pointer"
                   >
-                    <FileCheck2 className="h-4 w-4 shrink-0" />
-                    <span>{isExporting ? 'Compiling PDF...' : exportLabel}</span>
+                    <span>Edit ({pages.length})</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleGoToFinishPdf}
+                    className="relative inline-flex items-center gap-1.5 overflow-hidden rounded-xl p-[1.5px] cursor-pointer"
+                  >
+                    <span className="rgb-spectrum-glow absolute inset-0" />
+                    <span className="relative inline-flex items-center gap-1.5 rounded-[10px] bg-[#0B0A10] px-3.5 py-1.5 text-xs font-bold text-white">
+                      <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
+                      <span>Finish PDF</span>
+                    </span>
                   </button>
                 </div>
-              </aside>
+              )}
             </div>
-          </div>
-        )}
-      </main>
+          </header>
 
-      {/* ====================================================================
-          Quiet Footer
-         ==================================================================== */}
-      <footer className="border-t border-[#E5DDFB] bg-white/75 px-4 py-4 text-xs text-[#645E82] sm:px-8">
-        <div className="mx-auto flex max-w-[1380px] flex-wrap items-center justify-between gap-2">
-          <span className="font-semibold text-[#1E1B4B]">
-            © 2026 ShMp3100 Tool PDFMR
-          </span>
-          <span>
-            Supported images: JPG, JPEG, PNG, GIF, BMP, WEBP · All processing stays in your browser
-          </span>
-        </div>
-      </footer>
-
-      {/* ====================================================================
-          Camera Document Scanner Modal
-         ==================================================================== */}
-      {cameraOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[#1E1B4B]/65 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="camera-modal-title"
-        >
-          <div className="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-[#DFD4FC] bg-white text-[#1E1B4B] shadow-2xl">
-            <div className="flex items-center justify-between border-b border-[#EDE7FE] px-5 py-4">
-              <div>
-                <h2
-                  id="camera-modal-title"
-                  className="font-display text-lg font-extrabold"
+          {/* SCAN VIEWFINDER */}
+          {scanStep === 'scan' && (
+            <main className="relative z-20 mx-auto flex w-full max-w-[1040px] flex-1 flex-col items-center justify-between gap-4 px-4 py-4 sm:px-6">
+              <div className="relative flex w-full max-w-[780px] flex-1 items-center justify-center gap-3 sm:gap-5">
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (e.dataTransfer.files.length > 0) {
+                      handleImageFilesChosen(e.dataTransfer.files, true);
+                    }
+                  }}
+                  className="relative flex aspect-[3/4] max-h-[540px] w-full max-w-[430px] items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-[#0A0506] shadow-[0_24px_80px_rgba(0,0,0,0.85)]"
                 >
-                  Camera Document Scanner
-                </h2>
-                <p className="text-xs text-[#645E82]">
-                  Point at your document, capture one or more pages, and add directly to the PDF workbench.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setCameraOpen(false)}
-                aria-label="Close camera scanner"
-                className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#E5DDFB] text-[#645E82] hover:bg-[#F3EFFE] hover:text-[#1E1B4B] cursor-pointer"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="grid flex-1 gap-5 overflow-y-auto p-5 lg:grid-cols-[1.45fr_1fr]">
-              <div className="flex flex-col gap-3">
-                <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-[#DFD4FC] bg-[#131122]">
                   <video
                     ref={videoRef}
                     playsInline
@@ -3541,220 +2817,2110 @@ export default function App() {
                     className={`h-full w-full object-cover ${
                       cameraState === 'active' ? 'opacity-100' : 'opacity-0'
                     }`}
-                    style={{
-                      filter:
-                        cameraFilter === 'crisp'
-                          ? 'contrast(1.22) brightness(1.05)'
-                          : cameraFilter === 'mono'
-                            ? 'grayscale(1) contrast(1.4)'
-                            : 'none',
-                    }}
                   />
 
-                  {cameraState === 'active' && (
+                  <div className="pointer-events-none absolute inset-x-0 top-5 z-20 flex flex-col items-center px-6 text-center">
+                    <p className="rounded-full bg-black/55 px-3.5 py-1 text-xs font-semibold text-white/90 backdrop-blur-md">
+                      {detectedBox
+                        ? autoCapture
+                          ? `Document detected · Auto-capture ${lockProgress}%`
+                          : 'Document detected · Auto-crop ready'
+                        : 'Align document within the frame'}
+                    </p>
+                  </div>
+
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute z-10 transition-all duration-200"
+                    style={{
+                      left: detectedBox ? `${detectedBox.x * 100}%` : '7%',
+                      top: detectedBox ? `${detectedBox.y * 100}%` : '7%',
+                      width: detectedBox ? `${detectedBox.w * 100}%` : '86%',
+                      height: detectedBox ? `${detectedBox.h * 100}%` : '86%',
+                    }}
+                  >
+                    <span
+                      className={`absolute left-0 top-0 h-8 w-8 rounded-tl-xl border-l-[3.5px] border-t-[3.5px] ${accentBorderColor}`}
+                    />
+                    <span
+                      className={`absolute right-0 top-0 h-8 w-8 rounded-tr-xl border-r-[3.5px] border-t-[3.5px] ${accentBorderColor}`}
+                    />
+                    <span
+                      className={`absolute bottom-0 left-0 h-8 w-8 rounded-bl-xl border-b-[3.5px] border-l-[3.5px] ${accentBorderColor}`}
+                    />
+                    <span
+                      className={`absolute bottom-0 right-0 h-8 w-8 rounded-br-xl border-b-[3.5px] border-r-[3.5px] ${accentBorderColor}`}
+                    />
                     <div
-                      aria-hidden="true"
-                      className="pointer-events-none absolute inset-6 border border-dashed border-[#A78BFA]/70"
-                    >
-                      <span className="absolute -left-[1px] -top-[1px] h-4 w-4 border-l-2 border-t-2 border-[#6C3CE1]" />
-                      <span className="absolute -right-[1px] -top-[1px] h-4 w-4 border-r-2 border-t-2 border-[#6C3CE1]" />
-                      <span className="absolute -bottom-[1px] -left-[1px] h-4 w-4 border-b-2 border-l-2 border-[#6C3CE1]" />
-                      <span className="absolute -bottom-[1px] -right-[1px] h-4 w-4 border-b-2 border-r-2 border-[#6C3CE1]" />
-                    </div>
-                  )}
+                      className={`animate-scan-sweep absolute inset-x-2 h-[3px] rounded-full ${
+                        isRgbActive
+                          ? 'rgb-spectrum-glow shadow-[0_0_18px_rgba(34,211,238,0.85)]'
+                          : 'bg-gradient-to-r from-transparent via-[#FF3B3B] to-transparent shadow-[0_0_22px_rgba(255,45,45,0.95)]'
+                      }`}
+                    />
+                  </div>
 
                   {cameraState === 'idle' && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-sm text-[#DDD6FE]">
-                      <RefreshCw className="h-5 w-5 animate-spin text-[#A78BFA]" />
-                      <span>Starting camera feed...</span>
+                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/60 text-xs text-white/75">
+                      <RefreshCw className="h-5 w-5 animate-spin text-red-400" />
+                      <span>Starting auto-detection camera...</span>
                     </div>
                   )}
 
                   {cameraState === 'error' && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-white">
-                      <Camera className="h-8 w-8 text-[#A78BFA]" />
-                      <p className="max-w-sm text-sm text-[#EDE9FE]">
+                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[#100708]/95 p-6 text-center">
+                      <Camera className="h-9 w-9 text-red-400" />
+                      <p className="max-w-xs text-xs leading-relaxed text-white/80">
                         {cameraError}
                       </p>
-                      <button
-                        type="button"
-                        onClick={() => startCameraStream(facingMode)}
-                        className="rounded-xl bg-[#6C3CE1] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
-                      >
-                        Retry Camera
-                      </button>
+                      <div className="flex flex-wrap justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => startCamera(facingMode)}
+                          className="rounded-xl border border-white/15 bg-white/10 px-3.5 py-2 text-xs font-bold text-white hover:bg-white/20 cursor-pointer"
+                        >
+                          Retry Camera
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => galleryInputRef.current?.click()}
+                          className="rounded-xl bg-[#DC2626] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#B91C1C] cursor-pointer"
+                        >
+                          Choose File (Gallery)
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-1 rounded-xl bg-[#F3EFFE] p-1">
-                    {(
-                      [
-                        { id: 'original', label: 'Original' },
-                        { id: 'crisp', label: 'Crisp Scan' },
-                        { id: 'mono', label: 'Mono Ink' },
-                      ] as const
-                    ).map((preset) => (
+                {/* Right Vertical Mode Rail */}
+                <div className="flex flex-col gap-3 rounded-2xl border border-white/12 bg-[#1B0D10]/85 p-2 shadow-xl backdrop-blur-xl">
+                  {SCAN_CATEGORIES.map((cat) => {
+                    const Icon = cat.icon;
+                    const active = scanCategory === cat.id;
+                    return (
                       <button
-                        key={preset.id}
+                        key={cat.id}
                         type="button"
-                        onClick={() => setCameraFilter(preset.id)}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold cursor-pointer ${
-                          cameraFilter === preset.id
-                            ? 'bg-white text-[#6C3CE1] shadow-sm'
-                            : 'text-[#645E82] hover:text-[#1E1B4B]'
-                        }`}
+                        onClick={() => setScanCategory(cat.id)}
+                        className="flex flex-col items-center gap-1 rounded-xl p-1.5 transition-all cursor-pointer"
                       >
-                        {preset.label}
+                        <span
+                          className={`flex h-11 w-11 items-center justify-center rounded-full border transition-all ${
+                            active
+                              ? isRgbActive
+                                ? 'border-cyan-400 bg-cyan-500/20 text-white shadow-[0_0_16px_rgba(34,211,238,0.6)]'
+                                : 'border-[#FF3B3B] bg-[#DC2626] text-white shadow-[0_0_18px_rgba(239,68,68,0.75)]'
+                              : 'border-white/15 bg-white/5 text-white/70 hover:text-white'
+                          }`}
+                        >
+                          <Icon className="h-5 w-5" />
+                        </span>
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            active ? 'text-white' : 'text-white/55'
+                          }`}
+                        >
+                          {cat.label}
+                        </span>
                       </button>
-                    ))}
-                  </div>
+                    );
+                  })}
+                </div>
+              </div>
 
+              {/* Bottom Control Dock */}
+              <div className="w-full max-w-[540px] space-y-2 pb-2">
+                <div className="relative flex items-center justify-between rounded-3xl border border-white/12 bg-[#1A0D0F]/90 px-6 py-3.5 shadow-2xl backdrop-blur-xl">
+                  <button
+                    type="button"
+                    onClick={() => galleryInputRef.current?.click()}
+                    className="flex flex-col items-center gap-1 text-white/85 transition-colors hover:text-white cursor-pointer"
+                  >
+                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5">
+                      <ImageIcon className="h-5 w-5" />
+                    </span>
+                    <span className="text-xs font-semibold">Gallery</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleScanCapture}
+                    disabled={cameraState !== 'active' || isCapturing}
+                    className="relative -my-6 flex h-24 w-24 items-center justify-center rounded-full p-[3px] transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`absolute inset-0 rounded-full ${
+                        isRgbActive
+                          ? 'rgb-spectrum-glow shadow-[0_0_28px_rgba(34,211,238,0.65)]'
+                          : 'bg-gradient-to-b from-[#FF5252] to-[#B91C1C] shadow-[0_0_32px_rgba(239,68,68,0.85)]'
+                      }`}
+                    />
+                    <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#1C0B0D] text-white">
+                      <ScanLine className="h-6 w-6" />
+                      <span className="font-display mt-0.5 text-xs font-extrabold tracking-wider">
+                        {isCapturing ? '...' : 'SCAN'}
+                      </span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFlashOn((f) => !f)}
+                    className={`flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                      flashOn ? 'text-amber-300' : 'text-white/85 hover:text-white'
+                    }`}
+                  >
+                    <span
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl ${
+                        flashOn ? 'bg-amber-400/20' : 'bg-white/5'
+                      }`}
+                    >
+                      <Zap className="h-5 w-5" />
+                    </span>
+                    <span className="text-xs font-semibold">
+                      {flashOn ? 'Flash On' : 'Flash'}
+                    </span>
+                  </button>
+                </div>
+
+                <p className="text-center text-[11px] text-white/50">
+                  Tap SCAN for auto-detect &amp; auto-crop · Mode:{' '}
+                  <span className="font-semibold text-white/80">{scanCategory}</span> ·{' '}
+                  {pages.length} page(s) captured
+                </p>
+              </div>
+            </main>
+          )}
+
+          {/* EDIT & MANAGE (5 Friendly Options) */}
+          {scanStep === 'edit' && (
+            <main className="relative z-20 mx-auto grid w-full max-w-[1260px] flex-1 gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1.15fr_0.95fr]">
+              <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-[#140B0D]/85 p-5 backdrop-blur-xl">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="font-mono-tabular text-xs font-bold text-red-400">
+                      Page {selectedPageIdx + 1} of {pages.length}
+                    </span>
+                    <span className="mx-2 text-white/30">·</span>
+                    <span className="text-xs font-semibold text-white/80">
+                      {activePage?.label}
+                    </span>
+                  </div>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        setFacingMode((m) =>
-                          m === 'environment' ? 'user' : 'environment'
-                        )
-                      }
-                      className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-[#DFD4FC] bg-white px-3 text-xs font-bold text-[#4C1D95] hover:border-[#6C3CE1] cursor-pointer"
+                      onClick={() => setScanStep('scan')}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
                     >
-                      <RotateCw className="h-3.5 w-3.5" />
-                      <span>Flip</span>
+                      <Camera className="h-3.5 w-3.5" />
+                      <span>Scan More</span>
                     </button>
                     <button
                       type="button"
-                      onClick={handleCaptureCameraPage}
-                      disabled={cameraState !== 'active' || isCapturing}
-                      className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#6C3CE1] px-4 text-xs font-bold text-white hover:bg-[#5B21B6] disabled:opacity-40 cursor-pointer"
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 cursor-pointer"
                     >
-                      <Camera className="h-4 w-4" />
-                      <span>{isCapturing ? 'Capturing...' : 'Capture Page'}</span>
+                      <ImageIcon className="h-3.5 w-3.5" />
+                      <span>Add Image</span>
                     </button>
                   </div>
                 </div>
-              </div>
 
-              <div className="flex flex-col justify-between rounded-2xl border border-[#EDE7FE] bg-[#FAF8FF] p-4">
-                <div>
-                  <div className="mb-3 flex items-center justify-between border-b border-[#EDE7FE] pb-2">
-                    <h3 className="text-sm font-bold text-[#1E1B4B]">
-                      Captured Queue
-                    </h3>
-                    <span className="font-mono-tabular text-xs font-semibold text-[#6C3CE1]">
-                      {capturedFrames.length}p
-                    </span>
-                  </div>
-
-                  {capturedFrames.length === 0 ? (
-                    <div className="flex h-48 flex-col items-center justify-center text-center">
-                      <p className="text-xs font-semibold text-[#645E82]">
-                        No captured pages yet.
-                      </p>
-                      <p className="mt-1 text-[11px] text-[#847DA3]">
-                        Capture a document page to add it here.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="max-h-[290px] space-y-2 overflow-y-auto pr-1">
-                      {capturedFrames.map((frame, index) => (
+                <div className="flex flex-1 items-center justify-center py-2">
+                  {activePage && (
+                    <div className="paper-sheet-preview relative flex max-h-[440px] w-full max-w-[360px] items-center justify-center overflow-hidden rounded-sm p-3">
+                      <img
+                        src={activePage.processedUrl}
+                        alt={activePage.label}
+                        className="max-h-[416px] w-auto max-w-full object-contain"
+                      />
+                      {watermarkEnabled && watermarkText.trim() && (
                         <div
-                          key={frame.id}
-                          className="flex items-center gap-3 rounded-xl border border-[#E5DDFB] bg-white p-2"
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-0 flex items-center justify-center"
+                          style={{ opacity: watermarkOpacity }}
                         >
-                          <img
-                            src={frame.previewUrl}
-                            alt={`Scan ${index + 1}`}
-                            className="h-14 w-11 rounded border border-[#EDE7FE] object-cover"
-                          />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-xs font-bold text-[#1E1B4B]">
-                              Page {index + 1}
-                            </p>
-                            <div className="mt-1 flex gap-2">
-                              {(['original', 'crisp', 'mono'] as const).map((f) => (
-                                <button
-                                  key={f}
-                                  type="button"
-                                  onClick={() =>
-                                    handleCycleCapturedFilter(frame.id, f)
-                                  }
-                                  className={`text-[11px] cursor-pointer ${
-                                    frame.filter === f
-                                      ? 'font-bold text-[#6C3CE1] underline'
-                                      : 'text-[#847DA3]'
-                                  }`}
-                                >
-                                  {f === 'original'
-                                    ? 'Raw'
-                                    : f === 'crisp'
-                                      ? 'Crisp'
-                                      : 'Mono'}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setCapturedFrames((prev) =>
-                                prev.filter((c) => c.id !== frame.id)
-                              )
-                            }
-                            aria-label={`Remove scan ${index + 1}`}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#847DA3] hover:text-[#DC2626] cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          {watermarkPlacement === 'diagonal' ? (
+                            <span className="rotate-[-32deg] font-display text-lg font-extrabold text-violet-700">
+                              {watermarkText}
+                            </span>
+                          ) : (
+                            <span className="absolute bottom-2 left-3 text-[9px] font-bold text-violet-700">
+                              {watermarkText}
+                            </span>
+                          )}
                         </div>
-                      ))}
+                      )}
                     </div>
                   )}
                 </div>
 
-                <div className="mt-4 flex justify-end gap-2 border-t border-[#EDE7FE] pt-3">
+                <div className="flex gap-2.5 overflow-x-auto border-t border-white/10 pt-3">
+                  {pages.map((p, idx) => (
+                    <div
+                      key={p.id}
+                      onClick={() => setSelectedPageIdx(idx)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedPageIdx(idx);
+                        }
+                      }}
+                      className={`flex w-20 shrink-0 cursor-pointer flex-col items-center rounded-xl border p-1.5 transition-all ${
+                        idx === selectedPageIdx
+                          ? 'border-red-500 bg-red-500/15'
+                          : 'border-white/10 bg-white/5 hover:border-white/25'
+                      }`}
+                    >
+                      <img
+                        src={p.processedUrl}
+                        alt={`Page ${idx + 1}`}
+                        className="h-20 w-16 rounded object-cover"
+                      />
+                      <span className="font-mono-tabular mt-1 text-[10px] font-bold text-white/80">
+                        P.{idx + 1}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-[#140B0D]/90 p-5 backdrop-blur-xl">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                    {EDIT_TABS.map((t) => {
+                      const Icon = t.icon;
+                      const active = editTab === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => setEditTab(t.id)}
+                          className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-bold transition-all cursor-pointer ${
+                            active
+                              ? 'border-red-500 bg-red-500/20 text-white'
+                              : 'border-white/10 bg-white/5 text-white/65 hover:text-white'
+                          }`}
+                        >
+                          <Icon className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{t.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {editTab === 'crop' && activePage && (
+                    <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-bold text-white">
+                          Automatic &amp; Fine Edge Crop
+                        </h3>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const box = await autoDetectCropBoxFromUrl(
+                                activePage.rawUrl
+                              );
+                              await updateActivePage({ crop: box });
+                              notify('success', 'Re-ran automatic page edge detection!');
+                            }}
+                            className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500 cursor-pointer"
+                          >
+                            Auto-Crop Page
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateActivePage({
+                                crop: { top: 0, right: 0, bottom: 0, left: 0 },
+                              })
+                            }
+                            className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/80 hover:bg-white/10 cursor-pointer"
+                          >
+                            Full Frame
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        {(['top', 'bottom', 'left', 'right'] as const).map((edge) => (
+                          <label key={edge} className="block">
+                            <div className="mb-1 flex justify-between capitalize text-white/75">
+                              <span>{edge} Trim</span>
+                              <span className="font-mono-tabular">
+                                {Math.round(activePage.crop[edge] * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={0.35}
+                              step={0.01}
+                              value={activePage.crop[edge]}
+                              onChange={(e) =>
+                                updateActivePage({
+                                  crop: {
+                                    ...activePage.crop,
+                                    [edge]: Number(e.target.value),
+                                  },
+                                })
+                              }
+                              className="w-full accent-red-500 cursor-pointer"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {editTab === 'filter' && activePage && (
+                    <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-bold text-white">
+                          Scan Filter Settings
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            applyFilterToAllPages(
+                              activePage.filter,
+                              activePage.brightness,
+                              activePage.contrast
+                            )
+                          }
+                          className="text-xs font-bold text-red-400 hover:underline cursor-pointer"
+                        >
+                          Apply to All Pages
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {(
+                          [
+                            { id: 'original', label: 'Original' },
+                            { id: 'crisp', label: 'Crisp Color' },
+                            { id: 'grayscale', label: 'Grayscale' },
+                            { id: 'bw', label: 'B&W Ink' },
+                          ] as const
+                        ).map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            onClick={() => updateActivePage({ filter: f.id })}
+                            className={`rounded-xl border py-2 text-xs font-bold cursor-pointer ${
+                              activePage.filter === f.id
+                                ? 'border-red-500 bg-red-500/20 text-white'
+                                : 'border-white/10 bg-white/5 text-white/70 hover:text-white'
+                            }`}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="space-y-3 text-xs">
+                        <label className="block">
+                          <div className="mb-1 flex justify-between text-white/75">
+                            <span>Brightness</span>
+                            <span className="font-mono-tabular">
+                              {activePage.brightness}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={70}
+                            max={140}
+                            value={activePage.brightness}
+                            onChange={(e) =>
+                              updateActivePage({ brightness: Number(e.target.value) })
+                            }
+                            className="w-full accent-red-500 cursor-pointer"
+                          />
+                        </label>
+                        <label className="block">
+                          <div className="mb-1 flex justify-between text-white/75">
+                            <span>Contrast</span>
+                            <span className="font-mono-tabular">
+                              {activePage.contrast}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={80}
+                            max={175}
+                            value={activePage.contrast}
+                            onChange={(e) =>
+                              updateActivePage({ contrast: Number(e.target.value) })
+                            }
+                            className="w-full accent-red-500 cursor-pointer"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {editTab === 'arrange' && activePage && (
+                    <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                      <h3 className="text-sm font-bold text-white">
+                        Rotate &amp; Manage Page Order
+                      </h3>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateActivePage({
+                              rotation: (((activePage.rotation + 270) % 360) as
+                                | 0
+                                | 90
+                                | 180
+                                | 270),
+                            })
+                          }
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-bold text-white hover:bg-white/10 cursor-pointer"
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                          <span>Rotate Left</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateActivePage({
+                              rotation: (((activePage.rotation + 90) % 360) as
+                                | 0
+                                | 90
+                                | 180
+                                | 270),
+                            })
+                          }
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-bold text-white hover:bg-white/10 cursor-pointer"
+                        >
+                          <RotateCw className="h-4 w-4" />
+                          <span>Rotate Right</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          disabled={selectedPageIdx === 0}
+                          onClick={() => pageOrderMove(selectedPageIdx, -1)}
+                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/15 bg-white/5 py-2 text-xs font-semibold text-white disabled:opacity-35 cursor-pointer"
+                        >
+                          <ArrowLeft className="h-3.5 w-3.5" />
+                          <span>Earlier</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={selectedPageIdx === pages.length - 1}
+                          onClick={() => pageOrderMove(selectedPageIdx, 1)}
+                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-white/15 bg-white/5 py-2 text-xs font-semibold text-white disabled:opacity-35 cursor-pointer"
+                        >
+                          <span>Later</span>
+                          <ArrowRight className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removePageById(activePage.id)}
+                          className="inline-flex items-center justify-center gap-1 rounded-xl border border-red-500/30 bg-red-500/10 py-2 text-xs font-bold text-red-300 hover:bg-red-500/20 cursor-pointer"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {editTab === 'index' && (
+                    <div className="space-y-3.5 rounded-2xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-bold text-white">
+                          Book / Document Name &amp; Auto Index
+                        </h3>
+                        <button
+                          type="button"
+                          disabled={isAnalyzing}
+                          onClick={handleAutoAnalyzeAndIndex}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Wand2 className="h-3.5 w-3.5" />
+                          <span>
+                            {isAnalyzing ? 'Analyzing...' : 'Analyze Book & Index'}
+                          </span>
+                        </button>
+                      </div>
+
+                      <div className="grid gap-2.5 sm:grid-cols-2">
+                        <label className="block">
+                          <span className="mb-1 block text-[11px] font-semibold text-white/70">
+                            Book / Document Title
+                          </span>
+                          <input
+                            type="text"
+                            value={documentTitle}
+                            onChange={(e) => setDocumentTitle(e.target.value)}
+                            className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white focus:border-red-400 focus:outline-none"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 block text-[11px] font-semibold text-white/70">
+                            Output Filename (.pdf)
+                          </span>
+                          <input
+                            type="text"
+                            value={filename}
+                            onChange={(e) => setFilename(e.target.value)}
+                            className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white focus:border-red-400 focus:outline-none"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span className="text-xs font-semibold text-white">
+                          Add Auto-Index Page (Page 1)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setIncludeIndex((v) => !v)}
+                          className={`rounded-lg px-3 py-1 text-xs font-bold cursor-pointer ${
+                            includeIndex
+                              ? 'bg-red-600 text-white'
+                              : 'bg-white/10 text-white/60'
+                          }`}
+                        >
+                          {includeIndex ? 'Included' : 'Off'}
+                        </button>
+                      </div>
+
+                      {includeIndex && (
+                        <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
+                          {indexEntries.map((entry, i) => (
+                            <div key={entry.id} className="flex items-center gap-2">
+                              <span className="font-mono-tabular shrink-0 text-[11px] text-red-400">
+                                P.{entry.pageNumber}
+                              </span>
+                              <input
+                                type="text"
+                                value={entry.heading}
+                                onChange={(e) =>
+                                  setIndexEntries((prev) =>
+                                    prev.map((it, idx) =>
+                                      idx === i ? { ...it, heading: e.target.value } : it
+                                    )
+                                  )
+                                }
+                                className="w-full rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white focus:border-red-400 focus:outline-none"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {editTab === 'stamp' && (
+                    <div className="space-y-3.5 rounded-2xl border border-white/10 bg-black/30 p-4">
+                      <h3 className="text-sm font-bold text-white">
+                        Watermark &amp; Page Layout
+                      </h3>
+
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(['a4', 'letter', 'fit'] as const).map((sz) => (
+                          <button
+                            key={sz}
+                            type="button"
+                            onClick={() => setPageSize(sz)}
+                            className={`rounded-lg border py-1.5 text-xs font-bold uppercase cursor-pointer ${
+                              pageSize === sz
+                                ? 'border-red-500 bg-red-500/20 text-white'
+                                : 'border-white/10 bg-white/5 text-white/65'
+                            }`}
+                          >
+                            {sz}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span className="text-xs font-semibold text-white">
+                          Watermark Stamp
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setWatermarkEnabled((v) => !v)}
+                          className={`rounded-lg px-3 py-1 text-xs font-bold cursor-pointer ${
+                            watermarkEnabled
+                              ? 'bg-red-600 text-white'
+                              : 'bg-white/10 text-white/60'
+                          }`}
+                        >
+                          {watermarkEnabled ? 'On' : 'Off'}
+                        </button>
+                      </div>
+
+                      {watermarkEnabled && (
+                        <input
+                          type="text"
+                          value={watermarkText}
+                          onChange={(e) => setWatermarkText(e.target.value)}
+                          className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white focus:border-red-400 focus:outline-none"
+                        />
+                      )}
+
+                      <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                        <span className="text-xs font-semibold text-white">
+                          Page Numbers
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setPageNumbersEnabled((v) => !v)}
+                          className={`rounded-lg px-3 py-1 text-xs font-bold cursor-pointer ${
+                            pageNumbersEnabled
+                              ? 'bg-red-600 text-white'
+                              : 'bg-white/10 text-white/60'
+                          }`}
+                        >
+                          {pageNumbersEnabled ? 'On' : 'Off'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-white/10 pt-4">
                   <button
                     type="button"
-                    onClick={() => setCameraOpen(false)}
-                    className="rounded-xl border border-[#E5DDFB] bg-white px-3.5 py-2 text-xs font-bold text-[#645E82] cursor-pointer"
+                    onClick={handleGoToFinishPdf}
+                    className="relative flex w-full items-center justify-center overflow-hidden rounded-2xl p-[2px] cursor-pointer"
                   >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    disabled={capturedFrames.length === 0}
-                    onClick={handleCommitCameraScans}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#6C3CE1] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] disabled:opacity-40 cursor-pointer"
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    <span>Add to Workbench</span>
+                    <span className="rgb-spectrum-glow absolute inset-0" />
+                    <span className="relative flex w-full items-center justify-center gap-2 rounded-[14px] bg-[#100D14] py-3 text-sm font-extrabold text-white transition-colors hover:bg-[#191322]">
+                      <Sparkles className="h-4 w-4 text-cyan-300" />
+                      <span>Finish PDF (RGB Studio)</span>
+                      <ArrowRight className="h-4 w-4" />
+                    </span>
                   </button>
                 </div>
               </div>
+            </main>
+          )}
+
+          {/* FINISH PDF WITH RGB LIGHT */}
+          {scanStep === 'finish' && (
+            <main className="relative z-20 mx-auto w-full max-w-[980px] flex-1 px-4 py-6 sm:px-6">
+              <div className="relative overflow-hidden rounded-[28px] p-[2px] shadow-[0_24px_80px_rgba(34,211,238,0.22)]">
+                <div aria-hidden="true" className="rgb-spectrum-glow absolute inset-0" />
+
+                <div className="relative rounded-[26px] bg-[#0E0B14]/95 p-6 backdrop-blur-2xl sm:p-8">
+                  <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-5">
+                    <div>
+                      <p className="font-mono-tabular text-xs font-bold uppercase tracking-widest text-cyan-300">
+                        RGB Studio Finish
+                      </p>
+                      <h2 className="font-display mt-1 text-2xl font-extrabold text-white">
+                        Ready to Export Your PDF
+                      </h2>
+                      <p className="mt-1 text-xs text-white/65">
+                        Auto-detected document title, renamed file, scan filter settings, and automatic index page.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isAnalyzing}
+                      onClick={handleAutoAnalyzeAndIndex}
+                      className="inline-flex items-center gap-2 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-4 py-2 text-xs font-bold text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-50 cursor-pointer"
+                    >
+                      <Wand2 className="h-4 w-4" />
+                      <span>
+                        {isAnalyzing
+                          ? 'Analyzing Book / Doc...'
+                          : 'Re-Analyze Name & Index'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="mt-6 grid gap-6 md:grid-cols-2">
+                    <div className="space-y-4">
+                      <label className="block">
+                        <span className="mb-1.5 block text-xs font-semibold text-white/75">
+                          Detected Book / Document Name
+                        </span>
+                        <input
+                          type="text"
+                          value={documentTitle}
+                          onChange={(e) => setDocumentTitle(e.target.value)}
+                          className="w-full rounded-xl border border-white/15 bg-white/5 px-3.5 py-2.5 text-sm font-semibold text-white focus:border-cyan-400 focus:outline-none"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="mb-1.5 block text-xs font-semibold text-white/75">
+                          PDF Filename (Auto-Renamed)
+                        </span>
+                        <div className="flex items-center rounded-xl border border-white/15 bg-white/5 focus-within:border-cyan-400">
+                          <input
+                            type="text"
+                            value={filename}
+                            onChange={(e) => setFilename(e.target.value)}
+                            className="w-full bg-transparent px-3.5 py-2.5 text-sm font-semibold text-white focus:outline-none"
+                          />
+                          <span className="font-mono-tabular pr-3.5 text-xs text-white/50">
+                            .pdf
+                          </span>
+                        </div>
+                      </label>
+
+                      <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-white">
+                            Automatic Index Page (Page 1)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setIncludeIndex((v) => !v)}
+                            className={`rounded-lg px-3 py-1 text-xs font-bold cursor-pointer ${
+                              includeIndex
+                                ? 'bg-emerald-500 text-black'
+                                : 'bg-white/10 text-white/60'
+                            }`}
+                          >
+                            {includeIndex ? 'Enabled' : 'Disabled'}
+                          </button>
+                        </div>
+                        {includeIndex && (
+                          <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pr-1">
+                            {indexEntries.map((entry, idx) => (
+                              <div key={entry.id} className="flex items-center gap-2">
+                                <span className="font-mono-tabular shrink-0 text-[11px] text-cyan-300">
+                                  P.{entry.pageNumber}
+                                </span>
+                                <input
+                                  type="text"
+                                  value={entry.heading}
+                                  onChange={(e) =>
+                                    setIndexEntries((prev) =>
+                                      prev.map((it, i) =>
+                                        i === idx
+                                          ? { ...it, heading: e.target.value }
+                                          : it
+                                      )
+                                    )
+                                  }
+                                  className="w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1 text-xs text-white focus:border-cyan-400 focus:outline-none"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col justify-between space-y-4">
+                      <div className="space-y-4">
+                        <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                          <span className="mb-2 block text-xs font-bold text-white">
+                            Quick Scan Filter (All Pages)
+                          </span>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {(
+                              [
+                                { id: 'original', label: 'Original' },
+                                { id: 'crisp', label: 'Crisp' },
+                                { id: 'grayscale', label: 'Gray' },
+                                { id: 'bw', label: 'B&W' },
+                              ] as const
+                            ).map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                onClick={() => applyFilterToAllPages(f.id, 104, 115)}
+                                className={`rounded-xl border py-1.5 text-xs font-bold cursor-pointer ${
+                                  activePage?.filter === f.id
+                                    ? 'border-cyan-400 bg-cyan-500/20 text-white'
+                                    : 'border-white/10 bg-white/5 text-white/70 hover:text-white'
+                                }`}
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-xs">
+                          <div className="flex justify-between">
+                            <span className="text-white/60">Scanned Pages</span>
+                            <span className="font-mono-tabular font-bold text-white">
+                              {pages.length} {includeIndex ? '+ 1 Index' : ''}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-white/60">Page Format</span>
+                            <span className="font-mono-tabular font-bold uppercase text-white">
+                              {pageSize} · {margin}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-white/60">Watermark Stamp</span>
+                            <span className="font-semibold text-cyan-300">
+                              {watermarkEnabled ? watermarkText : 'Off'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        <button
+                          type="button"
+                          disabled={isCompiling}
+                          onClick={handleBuildFinalPdf}
+                          className="relative flex w-full items-center justify-center overflow-hidden rounded-2xl p-[2px] cursor-pointer disabled:opacity-50"
+                        >
+                          <span className="rgb-spectrum-glow absolute inset-0" />
+                          <span className="relative flex w-full items-center justify-center gap-2 rounded-[14px] bg-[#0B0912] py-3.5 text-sm font-extrabold text-white hover:bg-[#141022]">
+                            <Download className="h-4 w-4 text-cyan-300" />
+                            <span>
+                              {isCompiling ? 'Compiling PDF...' : 'Download Final PDF'}
+                            </span>
+                          </span>
+                        </button>
+
+                        <div className="grid grid-cols-2 gap-2.5">
+                          <button
+                            type="button"
+                            disabled={!finalPdf}
+                            onClick={() => finalPdf && setPreviewModalUrl(finalPdf.url)}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-bold text-white hover:bg-white/10 disabled:opacity-40 cursor-pointer"
+                          >
+                            <Eye className="h-3.5 w-3.5 text-cyan-300" />
+                            <span>Preview PDF</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setScanStep('scan')}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/5 py-2.5 text-xs font-bold text-white hover:bg-white/10 cursor-pointer"
+                          >
+                            <Camera className="h-3.5 w-3.5" />
+                            <span>Scan More</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </main>
+          )}
+        </>
+      ) : (
+        /* ====================================================================
+           MODE B: MAIN ALL-IN-ONE PDF WORKSPACE (EXACT MATCH TO image_633ed9b7.png)
+           ==================================================================== */
+        <>
+          {/* Crisp White Top Bar matching image_633ed9b7.png */}
+          <header className="sticky top-0 z-30 border-b border-purple-100 bg-white/95 backdrop-blur-md">
+            <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-6 px-4 py-3.5 sm:px-6">
+              {/* Zone 1: Brand Wordmark */}
+              <button
+                type="button"
+                onClick={() => setSection('all-tools')}
+                className="flex items-center gap-2.5 text-left cursor-pointer shrink-0"
+              >
+                <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full shadow-sm">
+                  <img
+                    src="/assets/aistudio/logo_of_shmp_3100_company-removebg-preview_e6609efe.png"
+                    alt="ShMp3100 Tool logo"
+                    className="h-full w-full object-cover"
+                  />
+                </span>
+                <span className="font-display text-lg font-extrabold tracking-tight text-slate-900 whitespace-nowrap">
+                  ShMp3100 Tool
+                </span>
+              </button>
+
+              {/* Zone 2: Single-line Nav Link (All Tools only; 3 sub-links hidden per request) */}
+              <nav className="hidden md:flex items-center gap-7 text-sm font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setSection('all-tools')}
+                  className={`border-b-2 pb-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    section === 'all-tools'
+                      ? 'border-[#6D28D9] text-[#6D28D9]'
+                      : 'border-transparent text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  All Tools
+                </button>
+              </nav>
+
+              {/* Zone 3: Primary Camera Scan CTA */}
+              <button
+                type="button"
+                onClick={() => openScanDocumentStudio('scan')}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#6D28D9] px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-[#5B21B6] whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Camera className="h-4 w-4" />
+                <span>Camera Scan</span>
+              </button>
             </div>
+
+            {/* Mobile Nav Strip (All Tools only) */}
+            <div className="flex gap-4 overflow-x-auto border-t border-purple-100/70 px-4 py-2 text-xs font-semibold md:hidden">
+              <button
+                type="button"
+                onClick={() => setSection('all-tools')}
+                className={`whitespace-nowrap pb-0.5 cursor-pointer ${
+                  section === 'all-tools'
+                    ? 'border-b-2 border-[#6D28D9] text-[#6D28D9]'
+                    : 'text-slate-600'
+                }`}
+              >
+                All Tools
+              </button>
+            </div>
+          </header>
+
+          {/* SECTION 1: ALL TOOLS (Exact layout & card grid from image_633ed9b7.png) */}
+          {section === 'all-tools' && (
+            <main className="mx-auto w-full max-w-[1220px] flex-1 space-y-10 px-4 py-8 sm:px-6">
+              {/* Hero Card */}
+              <section className="flex flex-col justify-between gap-6 rounded-3xl border border-purple-100 bg-white/95 p-7 shadow-sm sm:p-10 lg:flex-row lg:items-center">
+                <div className="max-w-xl space-y-2.5">
+                  <h1 className="font-display text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
+                    All-in-one PDF Workspace
+                  </h1>
+                  <p className="text-sm leading-relaxed text-slate-600 sm:text-base">
+                    Convert images, scan documents with your camera, merge or split PDFs, rotate pages, and publish templates with your{' '}
+                    <span className="font-semibold text-[#6D28D9]">
+                      ShMp3100 Tool PDFMR
+                    </span>{' '}
+                    watermark—all inside one fast web app.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setSection('image-scan')}
+                    className="inline-flex items-center gap-2 rounded-xl bg-[#6D28D9] px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#5B21B6] cursor-pointer"
+                  >
+                    <FilePlus2 className="h-4 w-4" />
+                    <span>Create PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openScanDocumentStudio('scan')}
+                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-800 shadow-xs transition-colors hover:bg-slate-50 cursor-pointer"
+                  >
+                    <Camera className="h-4 w-4 text-slate-700" />
+                    <span>Scan Document</span>
+                  </button>
+                </div>
+              </section>
+
+              {/* Convert & Create PDF */}
+              <section className="space-y-4">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                    Convert &amp; Create PDF
+                  </h2>
+                  <p className="text-xs font-medium text-slate-500">
+                    Select any tool to launch its workspace
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {/* Card 1: Image to PDF (Choose File + Apply Scan Document) */}
+                  <button
+                    type="button"
+                    onClick={() => setSection('image-scan')}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#6D28D9] text-white">
+                      <ImageIcon className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Image to PDF
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        JPG, JPEG, PNG, GIF, BMP, WEBP · Choose &amp; Scan
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Card 2: Camera Scanner (Launches Dark Scan Document UI) */}
+                  <button
+                    type="button"
+                    onClick={() => openScanDocumentStudio('scan')}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-600 text-white">
+                      <Camera className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Camera Scanner
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        Live auto-detect, auto-crop &amp; RGB finish
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Card 3: TXT & Notes to PDF */}
+                  <button
+                    type="button"
+                    onClick={() => handleOpenToolkitOption('txt-to-pdf')}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white">
+                      <FileText className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        TXT &amp; Notes to PDF
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        Turn text notes into clean vector PDFs
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Card 4: Invoice Generator */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTemplate('invoice');
+                      setSection('templates');
+                    }}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white">
+                      <Receipt className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Invoice Generator
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        Editable line items with automatic totals
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Card 5: Project Brief PDF */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTemplate('brief');
+                      setSection('templates');
+                    }}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white">
+                      <Code2 className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Project Brief PDF
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        Structured specification &amp; report sheet
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Card 6: Certificate Maker */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTemplate('certificate');
+                      setSection('templates');
+                    }}
+                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-white">
+                      <Award className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Certificate Maker
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        Landscape bordered certificate press
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Remaining Convert to PDF Cards (Word, PPT, Excel, HTML) */}
+                  {TOOLKIT_ITEMS.filter(
+                    (t) => t.group === 'Convert to PDF' && t.id !== 'txt-to-pdf'
+                  ).map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleOpenToolkitOption(item.id)}
+                        className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                      >
+                        <span
+                          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                        >
+                          <Icon className="h-5 w-5" />
+                        </span>
+                        <div className="min-w-0">
+                          <h3 className="font-display text-base font-bold text-slate-900">
+                            {item.label}
+                          </h3>
+                          <p className="truncate text-xs text-slate-500">
+                            {item.description}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* Convert from PDF */}
+              <section className="space-y-4">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                    Convert from PDF
+                  </h2>
+                  <p className="text-xs font-medium text-slate-500">
+                    Extract text, images, tables &amp; slide decks
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  {TOOLKIT_ITEMS.filter((t) => t.group === 'Convert from PDF').map(
+                    (item) => {
+                      const Icon = item.icon;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => handleOpenToolkitOption(item.id)}
+                          className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                        >
+                          <span
+                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                          >
+                            <Icon className="h-5 w-5" />
+                          </span>
+                          <div className="min-w-0">
+                            <h3 className="font-display text-base font-bold text-slate-900">
+                              {item.label}
+                            </h3>
+                            <p className="truncate text-xs text-slate-500">
+                              {item.description}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+              </section>
+
+              {/* Manage & Edit PDF */}
+              <section className="space-y-4 pb-8">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                    Manage &amp; Edit PDF
+                  </h2>
+                  <p className="text-xs font-medium text-slate-500">
+                    Client-side pdf-lib document engine
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {TOOLKIT_ITEMS.filter((t) => t.group === 'Manage & Edit PDF').map(
+                    (item) => {
+                      const Icon = item.icon;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => handleOpenToolkitOption(item.id)}
+                          className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                        >
+                          <span
+                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                          >
+                            <Icon className="h-5 w-5" />
+                          </span>
+                          <div className="min-w-0">
+                            <h3 className="font-display text-base font-bold text-slate-900">
+                              {item.label}
+                            </h3>
+                            <p className="truncate text-xs text-slate-500">
+                              {item.description}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    }
+                  )}
+                </div>
+              </section>
+            </main>
+          )}
+
+          {/* SECTION 2: IMAGE TO PDF (CHOOSE FILE) + APPLY SCAN DOCUMENT STUDIO */}
+          {section === 'image-scan' && (
+            <main className="mx-auto w-full max-w-[1160px] flex-1 space-y-6 px-4 py-8 sm:px-6">
+              <div className="rounded-3xl border border-purple-100 bg-white p-6 shadow-sm sm:p-8">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                  <div>
+                    <h1 className="font-display text-2xl font-extrabold text-slate-900">
+                      Image to PDF — Choose File &amp; Apply Scan Document
+                    </h1>
+                    <p className="mt-1 text-xs text-slate-500 sm:text-sm">
+                      Choose image files or launch Camera Scan, then apply automatic edge-crop, scan filters, 5 edit tools, auto-index, and RGB Finish PDF.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openScanDocumentStudio('scan')}
+                    className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white hover:bg-slate-800 cursor-pointer"
+                  >
+                    <ScanLine className="h-4 w-4 text-red-400" />
+                    <span>Open Scan Document Camera</span>
+                  </button>
+                </div>
+
+                {/* Choose Image File Dropzone */}
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (e.dataTransfer.files.length > 0) {
+                      handleImageFilesChosen(e.dataTransfer.files, false);
+                    }
+                  }}
+                  className="mt-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50/40 px-6 py-10 text-center"
+                >
+                  <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#6D28D9] text-white shadow-sm">
+                    <Upload className="h-6 w-6" />
+                  </span>
+                  <h2 className="font-display mt-3 text-lg font-bold text-slate-900">
+                    Choose Document / Image Files
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Drag &amp; drop JPG, JPEG, PNG, GIF, BMP, or WEBP — auto-cropped automatically on upload
+                  </p>
+                  <div className="mt-4 flex flex-wrap justify-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="inline-flex items-center gap-2 rounded-xl bg-[#6D28D9] px-5 py-2.5 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+                    >
+                      <FileImage className="h-4 w-4" />
+                      <span>Choose File(s)</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pages.length === 0}
+                      onClick={() => openScanDocumentStudio('edit')}
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 disabled:opacity-45 cursor-pointer"
+                    >
+                      <ScanLine className="h-4 w-4 text-red-600" />
+                      <span>Apply Scan Document UI on Chosen Files ({pages.length})</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Chosen Document Pages Queue */}
+                {pages.length > 0 && (
+                  <div className="mt-6 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="font-display text-sm font-bold text-slate-900">
+                        Auto-Cropped Document Queue ({pages.length} page
+                        {pages.length === 1 ? '' : 's'})
+                      </h3>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openScanDocumentStudio('edit')}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800 cursor-pointer"
+                        >
+                          <Sliders className="h-3.5 w-3.5 text-red-400" />
+                          <span>Scan Document Edit (5 Tools)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleGoToFinishPdf}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-[#6D28D9] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <span>Finish PDF (Auto-Index &amp; RGB)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
+                      {pages.map((p, idx) => (
+                        <div
+                          key={p.id}
+                          className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-2.5"
+                        >
+                          <img
+                            src={p.processedUrl}
+                            alt={p.label}
+                            className="aspect-[3/4] w-full rounded-xl bg-white object-contain"
+                          />
+                          <div className="mt-2 flex items-center justify-between text-xs">
+                            <span className="font-mono-tabular font-bold text-slate-700">
+                              P.{idx + 1} · {p.filter}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedPageIdx(idx);
+                                  openScanDocumentStudio('edit');
+                                }}
+                                className="rounded-lg bg-violet-100 px-2 py-1 text-[11px] font-bold text-violet-700 hover:bg-violet-200 cursor-pointer"
+                              >
+                                Scan Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removePageById(p.id)}
+                                aria-label="Remove page"
+                                className="rounded-lg p-1 text-slate-400 hover:text-red-600 cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </main>
+          )}
+
+          {/* SECTION 3: PDF TOOLKIT (All Converters + Manage Tools) */}
+          {section === 'toolkit' && (
+            <main className="mx-auto w-full max-w-[1220px] flex-1 px-4 py-8 sm:px-6">
+              <div className="grid gap-6 rounded-3xl border border-purple-100 bg-white p-6 shadow-sm lg:grid-cols-[260px_1fr]">
+                <aside className="space-y-4 border-b border-slate-100 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-5">
+                  {(
+                    [
+                      'Convert to PDF',
+                      'Convert from PDF',
+                      'Manage & Edit PDF',
+                    ] as const
+                  ).map((groupName) => (
+                    <div key={groupName} className="space-y-1">
+                      <p className="px-2 pb-1 text-[11px] font-bold text-slate-400">
+                        {groupName}
+                      </p>
+                      {TOOLKIT_ITEMS.filter((t) => t.group === groupName).map((t) => {
+                        const Icon = t.icon;
+                        const active = toolkitTool === t.id;
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => handleOpenToolkitOption(t.id)}
+                            className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-[#6D28D9] text-white'
+                                : 'text-slate-600 hover:bg-violet-50 hover:text-slate-900'
+                            }`}
+                          >
+                            <Icon className="h-4 w-4 shrink-0" />
+                            <span className="truncate">{t.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </aside>
+
+                <div className="space-y-5">
+                  {(() => {
+                    const activeMeta = TOOLKIT_ITEMS.find((i) => i.id === toolkitTool);
+                    const isConvertToPdf =
+                      toolkitTool === 'word-to-pdf' ||
+                      toolkitTool === 'ppt-to-pdf' ||
+                      toolkitTool === 'excel-to-pdf' ||
+                      toolkitTool === 'html-to-pdf' ||
+                      toolkitTool === 'txt-to-pdf';
+
+                    return (
+                      <>
+                        <div className="border-b border-slate-100 pb-3">
+                          <h1 className="font-display text-xl font-extrabold text-slate-900">
+                            {activeMeta?.label}
+                          </h1>
+                          <p className="text-xs text-slate-500">
+                            {activeMeta?.description}
+                          </p>
+                        </div>
+
+                        {isConvertToPdf ? (
+                          <div className="space-y-4">
+                            <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50/40 px-6 py-7 text-center">
+                              <Upload className="h-6 w-6 text-[#6D28D9]" />
+                              <p className="mt-2 text-xs font-semibold text-slate-700">
+                                {sourceDocFile
+                                  ? `Selected: ${sourceDocFile.name} (${formatBytes(sourceDocFile.size)})`
+                                  : 'Choose a file (.docx, .pptx, .xlsx, .csv, .html, .txt) or paste content below'}
+                              </p>
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => docConvertInputRef.current?.click()}
+                                  className="rounded-xl bg-[#6D28D9] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+                                >
+                                  Choose Source File
+                                </button>
+                                {sourceDocFile && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSourceDocFile(null)}
+                                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 cursor-pointer"
+                                  >
+                                    Clear
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            <textarea
+                              rows={6}
+                              value={workspaceTextInput}
+                              onChange={(e) => setWorkspaceTextInput(e.target.value)}
+                              placeholder={
+                                toolkitTool === 'excel-to-pdf'
+                                  ? 'Item,Qty,Price\nDocument Scan,2,40.00'
+                                  : toolkitTool === 'ppt-to-pdf'
+                                    ? 'Slide 1 Title\nBullet point\n---\nSlide 2 Title\nSummary'
+                                    : toolkitTool === 'html-to-pdf'
+                                      ? '<h1>Title</h1><p>Paste HTML here...</p>'
+                                      : 'Type or paste document text here...'
+                              }
+                              className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3.5 text-xs text-slate-900 focus:border-[#6D28D9] focus:outline-none"
+                            />
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50/40 px-6 py-7 text-center">
+                              <FilePlus2 className="h-7 w-7 text-[#6D28D9]" />
+                              <p className="mt-2 text-sm font-bold text-slate-900">
+                                {toolkitTool === 'merge'
+                                  ? 'Choose 2 or more PDF files to merge'
+                                  : 'Choose a PDF file to process'}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => pdfInputRef.current?.click()}
+                                className="mt-3 rounded-xl bg-[#6D28D9] px-4 py-2 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+                              >
+                                Choose PDF {toolkitTool === 'merge' ? 'Files' : 'File'}
+                              </button>
+                            </div>
+
+                            {toolkitTool === 'sign' && (
+                              <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold text-slate-800">
+                                    Draw Signature or Type Name
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const c = sigCanvasRef.current;
+                                      c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+                                      setSignatureDataUrl(null);
+                                    }}
+                                    className="text-xs font-semibold text-[#6D28D9] hover:underline cursor-pointer"
+                                  >
+                                    Clear Pad
+                                  </button>
+                                </div>
+                                <canvas
+                                  ref={sigCanvasRef}
+                                  width={480}
+                                  height={120}
+                                  onPointerDown={(e) => {
+                                    const c = sigCanvasRef.current;
+                                    if (!c) return;
+                                    isDrawingSigRef.current = true;
+                                    const rect = c.getBoundingClientRect();
+                                    const ctx = c.getContext('2d');
+                                    if (!ctx) return;
+                                    ctx.strokeStyle = '#4c1d95';
+                                    ctx.lineWidth = 2.5;
+                                    ctx.lineCap = 'round';
+                                    ctx.beginPath();
+                                    ctx.moveTo(
+                                      ((e.clientX - rect.left) / rect.width) * c.width,
+                                      ((e.clientY - rect.top) / rect.height) * c.height
+                                    );
+                                  }}
+                                  onPointerMove={(e) => {
+                                    if (!isDrawingSigRef.current || !sigCanvasRef.current)
+                                      return;
+                                    const c = sigCanvasRef.current;
+                                    const rect = c.getBoundingClientRect();
+                                    const ctx = c.getContext('2d');
+                                    if (!ctx) return;
+                                    ctx.lineTo(
+                                      ((e.clientX - rect.left) / rect.width) * c.width,
+                                      ((e.clientY - rect.top) / rect.height) * c.height
+                                    );
+                                    ctx.stroke();
+                                  }}
+                                  onPointerUp={() => {
+                                    isDrawingSigRef.current = false;
+                                    if (sigCanvasRef.current) {
+                                      setSignatureDataUrl(
+                                        sigCanvasRef.current.toDataURL('image/png')
+                                      );
+                                    }
+                                  }}
+                                  className="h-28 w-full touch-none rounded-xl border border-slate-200 bg-white cursor-crosshair"
+                                />
+                                <input
+                                  type="text"
+                                  value={signatureName}
+                                  onChange={(e) => setSignatureName(e.target.value)}
+                                  placeholder="Typed signature name"
+                                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-[#6D28D9] focus:outline-none"
+                                />
+                              </div>
+                            )}
+
+                            {toolkitTool === 'protect' && (
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <input
+                                  type="text"
+                                  value={protectNotice}
+                                  onChange={(e) => setProtectNotice(e.target.value)}
+                                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 sm:col-span-2"
+                                />
+                                <input
+                                  type="text"
+                                  value={metaTitle}
+                                  onChange={(e) => setMetaTitle(e.target.value)}
+                                  placeholder="Document Title"
+                                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900"
+                                />
+                                <input
+                                  type="text"
+                                  value={metaAuthor}
+                                  onChange={(e) => setMetaAuthor(e.target.value)}
+                                  placeholder="Author"
+                                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900"
+                                />
+                              </div>
+                            )}
+
+                            {toolkitTool === 'split' && (
+                              <input
+                                type="text"
+                                value={splitRange}
+                                onChange={(e) => setSplitRange(e.target.value)}
+                                placeholder="Page Range (e.g. 1-3, 5)"
+                                className="font-mono-tabular w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900"
+                              />
+                            )}
+
+                            {toolkitTool === 'rotate' && (
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <div className="grid grid-cols-3 gap-1.5">
+                                  {([90, 180, 270] as const).map((deg) => (
+                                    <button
+                                      key={deg}
+                                      type="button"
+                                      onClick={() => setRotateDegrees(deg)}
+                                      className={`rounded-xl border py-2 text-xs font-bold cursor-pointer ${
+                                        rotateDegrees === deg
+                                          ? 'border-[#6D28D9] bg-violet-50 text-[#6D28D9]'
+                                          : 'border-slate-200 bg-white text-slate-600'
+                                      }`}
+                                    >
+                                      {deg}°
+                                    </button>
+                                  ))}
+                                </div>
+                                <input
+                                  type="text"
+                                  value={rotateRange}
+                                  onChange={(e) => setRotateRange(e.target.value)}
+                                  placeholder="All pages (or e.g. 1, 3)"
+                                  className="font-mono-tabular rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900"
+                                />
+                              </div>
+                            )}
+
+                            {toolkitTool === 'metadata' && (
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <input
+                                  type="text"
+                                  value={metaTitle}
+                                  onChange={(e) => setMetaTitle(e.target.value)}
+                                  placeholder="Document Title"
+                                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900"
+                                />
+                                <input
+                                  type="text"
+                                  value={metaAuthor}
+                                  onChange={(e) => setMetaAuthor(e.target.value)}
+                                  placeholder="Author"
+                                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900"
+                                />
+                              </div>
+                            )}
+
+                            {toolkitFiles.length > 0 && (
+                              <div className="space-y-2">
+                                {toolkitFiles.map((item, idx) => (
+                                  <div
+                                    key={item.id}
+                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5"
+                                  >
+                                    <div className="min-w-0">
+                                      <p className="truncate text-xs font-bold text-slate-900">
+                                        {item.fileName}
+                                      </p>
+                                      <p className="font-mono-tabular text-[11px] text-slate-500">
+                                        {item.pageCount}p · {formatBytes(item.sizeBytes)}
+                                      </p>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      {toolkitTool === 'merge' && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            disabled={idx === 0}
+                                            onClick={() =>
+                                              setToolkitFiles((prev) => {
+                                                const next = [...prev];
+                                                const [m] = next.splice(idx, 1);
+                                                next.splice(idx - 1, 0, m);
+                                                return next;
+                                              })
+                                            }
+                                            className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-600 hover:bg-slate-200 disabled:opacity-30 cursor-pointer"
+                                          >
+                                            <ArrowUp className="h-3.5 w-3.5" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={idx === toolkitFiles.length - 1}
+                                            onClick={() =>
+                                              setToolkitFiles((prev) => {
+                                                const next = [...prev];
+                                                const [m] = next.splice(idx, 1);
+                                                next.splice(idx + 1, 0, m);
+                                                return next;
+                                              })
+                                            }
+                                            className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-600 hover:bg-slate-200 disabled:opacity-30 cursor-pointer"
+                                          >
+                                            <ArrowDown className="h-3.5 w-3.5" />
+                                          </button>
+                                        </>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setToolkitFiles((prev) =>
+                                            prev.filter((p) => p.id !== item.id)
+                                          )
+                                        }
+                                        className="inline-flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:text-red-600 cursor-pointer"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          disabled={
+                            isCompiling ||
+                            (!isConvertToPdf &&
+                              (toolkitTool === 'merge'
+                                ? toolkitFiles.length < 2
+                                : toolkitFiles.length < 1))
+                          }
+                          onClick={handleRunToolkitExport}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#6D28D9] py-3 text-sm font-bold text-white hover:bg-[#5B21B6] disabled:opacity-40 cursor-pointer"
+                        >
+                          <FileCheck2 className="h-4 w-4" />
+                          <span>
+                            {isCompiling
+                              ? 'Processing...'
+                              : `Execute ${activeMeta?.label || 'Tool'} & Download`}
+                          </span>
+                        </button>
+
+                        {convertedOutput && (
+                          <div className="space-y-3 rounded-2xl border border-violet-200 bg-violet-50/50 p-4">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-xs font-bold text-slate-900">
+                                {convertedOutput.title}
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    triggerDownload(
+                                      convertedOutput.downloadUrl,
+                                      convertedOutput.downloadName
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#6D28D9] px-3 py-1.5 text-xs font-bold text-white cursor-pointer"
+                                >
+                                  <Download className="h-3.5 w-3.5" />
+                                  <span>{convertedOutput.downloadName}</span>
+                                </button>
+                                {convertedOutput.secondaryUrl &&
+                                  convertedOutput.secondaryName && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        triggerDownload(
+                                          convertedOutput.secondaryUrl!,
+                                          convertedOutput.secondaryName!
+                                        )
+                                      }
+                                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-800 cursor-pointer"
+                                    >
+                                      <Download className="h-3.5 w-3.5" />
+                                      <span>{convertedOutput.secondaryName}</span>
+                                    </button>
+                                  )}
+                              </div>
+                            </div>
+                            {convertedOutput.textPreview && (
+                              <pre className="max-h-56 overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-800 whitespace-pre-wrap">
+                                {convertedOutput.textPreview}
+                              </pre>
+                            )}
+                            {convertedOutput.images &&
+                              convertedOutput.images.length > 0 && (
+                                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                  {convertedOutput.images.map((img) => (
+                                    <div
+                                      key={img.pageNumber}
+                                      className="overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5"
+                                    >
+                                      <img
+                                        src={img.url}
+                                        alt={`Page ${img.pageNumber}`}
+                                        className="w-full rounded object-contain"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          triggerDownload(
+                                            img.url,
+                                            `page_${img.pageNumber}.png`
+                                          )
+                                        }
+                                        className="mt-1.5 flex w-full items-center justify-center gap-1 rounded-lg bg-slate-900 py-1 text-[11px] font-bold text-white cursor-pointer"
+                                      >
+                                        <Download className="h-3 w-3" />
+                                        <span>Page {img.pageNumber} PNG</span>
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            </main>
+          )}
+
+          {/* SECTION 4: TEMPLATES (Invoice, Project Brief, Certificate) */}
+          {section === 'templates' && (
+            <main className="mx-auto w-full max-w-[1100px] flex-1 px-4 py-8 sm:px-6">
+              <div className="rounded-3xl border border-purple-100 bg-white p-6 shadow-sm sm:p-8">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-5">
+                  <div>
+                    <h1 className="font-display text-2xl font-extrabold text-slate-900">
+                      PDF Document Templates
+                    </h1>
+                    <p className="text-xs text-slate-500">
+                      Generate clean vector PDFs with your {watermarkText} watermark.
+                    </p>
+                  </div>
+                  <div className="flex gap-1.5 rounded-xl bg-slate-100 p-1">
+                    {(
+                      [
+                        { id: 'invoice', label: 'Invoice' },
+                        { id: 'brief', label: 'Project Brief' },
+                        { id: 'certificate', label: 'Certificate' },
+                      ] as const
+                    ).map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setActiveTemplate(t.id)}
+                        className={`rounded-lg px-3.5 py-1.5 text-xs font-bold cursor-pointer ${
+                          activeTemplate === t.id
+                            ? 'bg-[#6D28D9] text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {activeTemplate === 'invoice' && (
+                  <div className="mt-6 space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        value={invoiceClient}
+                        onChange={(e) => setInvoiceClient(e.target.value)}
+                        placeholder="Client Name"
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900"
+                      />
+                      <input
+                        type="text"
+                        value={invoiceNumber}
+                        onChange={(e) => setInvoiceNumber(e.target.value)}
+                        placeholder="Invoice Number"
+                        className="font-mono-tabular rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      {invoiceItems.map((it, idx) => (
+                        <div key={it.id} className="grid grid-cols-[1fr_70px_90px_auto] gap-2">
+                          <input
+                            type="text"
+                            value={it.description}
+                            onChange={(e) =>
+                              setInvoiceItems((prev) =>
+                                prev.map((x, i) =>
+                                  i === idx ? { ...x, description: e.target.value } : x
+                                )
+                              )
+                            }
+                            className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-900"
+                          />
+                          <input
+                            type="number"
+                            value={it.qty}
+                            onChange={(e) =>
+                              setInvoiceItems((prev) =>
+                                prev.map((x, i) =>
+                                  i === idx ? { ...x, qty: Number(e.target.value) } : x
+                                )
+                              )
+                            }
+                            className="font-mono-tabular rounded-xl border border-slate-200 px-2.5 py-2 text-xs text-slate-900"
+                          />
+                          <input
+                            type="number"
+                            value={it.unitPrice}
+                            onChange={(e) =>
+                              setInvoiceItems((prev) =>
+                                prev.map((x, i) =>
+                                  i === idx
+                                    ? { ...x, unitPrice: Number(e.target.value) }
+                                    : x
+                                )
+                              )
+                            }
+                            className="font-mono-tabular rounded-xl border border-slate-200 px-2.5 py-2 text-xs text-slate-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setInvoiceItems((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                            className="rounded-xl px-2 text-slate-400 hover:text-red-600 cursor-pointer"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex items-center justify-between pt-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setInvoiceItems((prev) => [
+                              ...prev,
+                              {
+                                id: String(Date.now()),
+                                description: 'Additional PDF Service',
+                                qty: 1,
+                                unitPrice: 50,
+                              },
+                            ])
+                          }
+                          className="inline-flex items-center gap-1 text-xs font-bold text-[#6D28D9] cursor-pointer"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Add Line Item</span>
+                        </button>
+                        <span className="font-mono-tabular text-sm font-extrabold text-slate-900">
+                          Total: ${invoiceTotal.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activeTemplate === 'brief' && (
+                  <div className="mt-6 space-y-3">
+                    <input
+                      type="text"
+                      value={briefTitle}
+                      onChange={(e) => setBriefTitle(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm font-semibold text-slate-900"
+                    />
+                    <textarea
+                      rows={3}
+                      value={briefSummary}
+                      onChange={(e) => setBriefSummary(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-900"
+                    />
+                    <textarea
+                      rows={4}
+                      value={briefScope}
+                      onChange={(e) => setBriefScope(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-900"
+                    />
+                  </div>
+                )}
+
+                {activeTemplate === 'certificate' && (
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                    <input
+                      type="text"
+                      value={certRecipient}
+                      onChange={(e) => setCertRecipient(e.target.value)}
+                      placeholder="Recipient Name"
+                      className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm font-semibold text-slate-900"
+                    />
+                    <input
+                      type="text"
+                      value={certIssuer}
+                      onChange={(e) => setCertIssuer(e.target.value)}
+                      placeholder="Issuing Organization"
+                      className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900"
+                    />
+                    <input
+                      type="text"
+                      value={certCourse}
+                      onChange={(e) => setCertCourse(e.target.value)}
+                      placeholder="Achievement / Program"
+                      className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 sm:col-span-2"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={isCompiling}
+                  onClick={() => handleGenerateTemplatePdf(activeTemplate)}
+                  className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#6D28D9] py-3 text-sm font-bold text-white hover:bg-[#5B21B6] disabled:opacity-45 cursor-pointer"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>
+                    {isCompiling
+                      ? 'Generating Vector PDF...'
+                      : `Generate & Download ${activeTemplate.toUpperCase()} PDF`}
+                  </span>
+                </button>
+              </div>
+            </main>
+          )}
+        </>
+      )}
+
+      {/* ====================================================================
+          In-App PDF Viewer Modal
+         ==================================================================== */}
+      {previewModalUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="flex h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-white/15 bg-[#120D14]">
+            <div className="flex items-center justify-between border-b border-white/10 px-5 py-3">
+              <span className="font-display text-sm font-bold text-white">
+                {finalPdf?.filename}
+              </span>
+              <div className="flex items-center gap-2">
+                {finalPdf && (
+                  <button
+                    type="button"
+                    onClick={() => triggerDownload(finalPdf.url, finalPdf.filename)}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-500 px-3 py-1.5 text-xs font-bold text-black cursor-pointer"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewModalUrl(null)}
+                  aria-label="Close PDF preview"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/15 text-white/75 hover:bg-white/10 cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <iframe
+              src={previewModalUrl}
+              title="Compiled PDF Preview"
+              className="h-full w-full flex-1 bg-white"
+            />
           </div>
         </div>
       )}
 
       {/* ====================================================================
-          Toast Notification
+          Toast Feedback
          ==================================================================== */}
       {toast && (
         <div
           role="status"
           aria-live="polite"
-          className={`fixed bottom-5 right-5 z-50 flex max-w-sm items-center gap-2.5 rounded-2xl border px-4 py-3 text-xs font-semibold shadow-xl ${
+          className={`fixed bottom-5 right-5 z-50 flex max-w-sm items-center gap-2.5 rounded-2xl border px-4 py-3 text-xs font-semibold shadow-2xl backdrop-blur-xl ${
             toast.kind === 'success'
-              ? 'border-[#BBF7D0] bg-white text-[#166534]'
-              : 'border-[#FECACA] bg-white text-[#991B1B]'
+              ? 'border-emerald-500/40 bg-[#0D1A12]/95 text-emerald-200'
+              : 'border-red-500/40 bg-[#1F0B0D]/95 text-red-200'
           }`}
         >
           {toast.kind === 'success' ? (
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-[#16A34A]" />
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
           ) : (
-            <AlertCircle className="h-4 w-4 shrink-0 text-[#DC2626]" />
+            <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
           )}
           <span>{toast.text}</span>
         </div>

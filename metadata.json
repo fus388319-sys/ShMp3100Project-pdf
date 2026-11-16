@@ -1,6 +1,10 @@
 {
   "name": "ShMp3100 Tool — PDFMR Studio",
   "description": "Precision browser-based PDF maker, camera document scanner, and multi-tool PDF studio by ShMp3100.",
-  "requestFramePermissions": ["camera"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
