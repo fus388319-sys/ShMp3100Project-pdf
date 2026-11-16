@@ -29,6 +29,7 @@ import {
   Image as ImageIcon,
   Layers,
   ListOrdered,
+  Lock,
   MoreHorizontal,
   PenTool,
   Plus,
@@ -1527,9 +1528,11 @@ export default function App() {
   const [indexEntries, setIndexEntries] = useState<IndexEntry[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
-  // PDF Output Settings
+  // PDF Output Settings (Default Watermark & Stamp locked; untick requires Rs 1,200)
   const [pageSize, setPageSize] = useState<PageSizeOption>('a4');
   const [margin, setMargin] = useState<MarginOption>('compact');
+  const [watermarkUnlocked, setWatermarkUnlocked] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState(true);
   const [watermarkText, setWatermarkText] = useState('ShMp3100 Tool PDFMR');
   const [watermarkOpacity, setWatermarkOpacity] = useState(0.2);
@@ -1590,6 +1593,15 @@ export default function App() {
   const notify = useCallback((kind: 'success' | 'error', text: string) => {
     setToast({ id: Date.now(), kind, text });
   }, []);
+
+  const handleToggleWatermark = useCallback(() => {
+    if (!watermarkUnlocked) {
+      setShowUnlockModal(true);
+      notify('error', 'Default watermark & stamp is locked. Unlock for Rs 1,200 to untick.');
+      return;
+    }
+    setWatermarkEnabled((v) => !v);
+  }, [watermarkUnlocked, notify]);
 
   useEffect(() => {
     if (!toast) return;
@@ -3445,29 +3457,49 @@ export default function App() {
                         ))}
                       </div>
 
-                      <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                        <span className="text-xs font-semibold text-white">
-                          Watermark Stamp
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setWatermarkEnabled((v) => !v)}
-                          className={`rounded-lg px-3 py-1 text-xs font-bold cursor-pointer ${
-                            watermarkEnabled
-                              ? 'bg-red-600 text-white'
-                              : 'bg-white/10 text-white/60'
-                          }`}
-                        >
-                          {watermarkEnabled ? 'On' : 'Off'}
-                        </button>
+                      <div className="space-y-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="flex items-center gap-2 text-xs font-semibold text-white cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={watermarkEnabled}
+                              onChange={handleToggleWatermark}
+                              className="h-4 w-4 accent-red-500 cursor-pointer"
+                            />
+                            <span>Default Watermark &amp; Stamp</span>
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleToggleWatermark}
+                            className="inline-flex items-center gap-1 rounded-lg bg-amber-500/20 border border-amber-400/40 px-2.5 py-1 text-[11px] font-bold text-amber-300 hover:bg-amber-500/30 cursor-pointer whitespace-nowrap"
+                          >
+                            <Lock className="h-3 w-3" />
+                            <span>
+                              {watermarkUnlocked
+                                ? watermarkEnabled
+                                  ? 'On'
+                                  : 'Off'
+                                : 'Locked · Rs 1,200'}
+                            </span>
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-white/55">
+                          Default stamp stays ON. Untick / remove watermark requires Rs 1,200 unlock.
+                        </p>
                       </div>
 
                       {watermarkEnabled && (
                         <input
                           type="text"
                           value={watermarkText}
-                          onChange={(e) => setWatermarkText(e.target.value)}
-                          className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white focus:border-red-400 focus:outline-none"
+                          readOnly={!watermarkUnlocked}
+                          onClick={() => {
+                            if (!watermarkUnlocked) setShowUnlockModal(true);
+                          }}
+                          onChange={(e) => {
+                            if (watermarkUnlocked) setWatermarkText(e.target.value);
+                          }}
+                          className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/90 focus:border-red-400 focus:outline-none disabled:opacity-75"
                         />
                       )}
 
@@ -3664,11 +3696,20 @@ export default function App() {
                               {pageSize} · {margin}
                             </span>
                           </div>
-                          <div className="flex justify-between">
+                          <div className="flex items-center justify-between gap-2">
                             <span className="text-white/60">Watermark Stamp</span>
-                            <span className="font-semibold text-cyan-300">
-                              {watermarkEnabled ? watermarkText : 'Off'}
-                            </span>
+                            <button
+                              type="button"
+                              onClick={handleToggleWatermark}
+                              className="inline-flex items-center gap-1.5 font-semibold text-cyan-300 hover:underline cursor-pointer"
+                            >
+                              {!watermarkUnlocked && <Lock className="h-3 w-3 text-amber-300" />}
+                              <span>
+                                {watermarkEnabled
+                                  ? `${watermarkText}${watermarkUnlocked ? '' : ' (Untick Rs 1,200)'}`
+                                  : 'Removed'}
+                              </span>
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -3823,11 +3864,11 @@ export default function App() {
 
               {/* Convert & Create PDF */}
               <section className="space-y-4">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
                   <h2 className="font-display text-xl font-extrabold text-slate-900">
                     Convert &amp; Create PDF
                   </h2>
-                  <p className="text-xs font-medium text-slate-500">
+                  <p className="text-xs font-semibold text-slate-600">
                     Select any tool to launch its workspace
                   </p>
                 </div>
@@ -3989,11 +4030,11 @@ export default function App() {
 
               {/* Convert from PDF */}
               <section className="space-y-4">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
                   <h2 className="font-display text-xl font-extrabold text-slate-900">
                     Convert from PDF
                   </h2>
-                  <p className="text-xs font-medium text-slate-500">
+                  <p className="text-xs font-semibold text-slate-600">
                     Extract text, images, tables &amp; slide decks
                   </p>
                 </div>
@@ -4031,11 +4072,11 @@ export default function App() {
 
               {/* Manage & Edit PDF */}
               <section className="space-y-4 pb-8">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
                   <h2 className="font-display text-xl font-extrabold text-slate-900">
                     Manage &amp; Edit PDF
                   </h2>
-                  <p className="text-xs font-medium text-slate-500">
+                  <p className="text-xs font-semibold text-slate-600">
                     Client-side pdf-lib document engine
                   </p>
                 </div>
@@ -4135,6 +4176,33 @@ export default function App() {
                       <span>Apply Scan Document UI on Chosen Files ({pages.length})</span>
                     </button>
                   </div>
+                </div>
+
+                {/* Locked Default Watermark & Stamp Strip */}
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50/75 px-4 py-3">
+                  <label className="flex items-center gap-2.5 text-xs font-bold text-slate-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={watermarkEnabled}
+                      onChange={handleToggleWatermark}
+                      className="h-4 w-4 rounded border-amber-400 text-[#6D28D9] accent-[#6D28D9] cursor-pointer"
+                    />
+                    <span>Default Watermark &amp; Stamp ({watermarkText})</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleToggleWatermark}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                  >
+                    <Lock className="h-3 w-3" />
+                    <span>
+                      {watermarkUnlocked
+                        ? watermarkEnabled
+                          ? 'Unlocked · Click to Untick'
+                          : 'Off · Click to Enable'
+                        : 'Locked ON · Untick Rs 1,200'}
+                    </span>
+                  </button>
                 </div>
 
                 {/* Chosen Document Pages Queue */}
@@ -4486,6 +4554,50 @@ export default function App() {
                               </div>
                             )}
 
+                            {/* Locked Default Watermark & Stamp Status in PDF Toolkit */}
+                            <div className="rounded-2xl border border-amber-200 bg-amber-50/75 p-3.5 space-y-2.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <label className="flex items-center gap-2.5 text-xs font-bold text-slate-900 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={watermarkEnabled}
+                                    onChange={handleToggleWatermark}
+                                    className="h-4 w-4 rounded border-amber-400 text-[#6D28D9] accent-[#6D28D9] cursor-pointer"
+                                  />
+                                  <span>Default Watermark &amp; Stamp</span>
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={handleToggleWatermark}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                                >
+                                  <Lock className="h-3 w-3" />
+                                  <span>
+                                    {watermarkUnlocked
+                                      ? watermarkEnabled
+                                        ? 'Unlocked · Click to Untick'
+                                        : 'Off · Click to Enable'
+                                      : 'Locked · Untick Rs 1,200'}
+                                  </span>
+                                </button>
+                              </div>
+                              {toolkitTool === 'watermark' && (
+                                <input
+                                  type="text"
+                                  value={watermarkText}
+                                  readOnly={!watermarkUnlocked}
+                                  onClick={() => {
+                                    if (!watermarkUnlocked) setShowUnlockModal(true);
+                                  }}
+                                  onChange={(e) => {
+                                    if (watermarkUnlocked) setWatermarkText(e.target.value);
+                                  }}
+                                  placeholder="Watermark text"
+                                  className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-[#6D28D9] focus:outline-none"
+                                />
+                              )}
+                            </div>
+
                             {toolkitFiles.length > 0 && (
                               <div className="space-y-2">
                                 {toolkitFiles.map((item, idx) => (
@@ -4671,27 +4783,39 @@ export default function App() {
                       Generate clean vector PDFs with your {watermarkText} watermark.
                     </p>
                   </div>
-                  <div className="flex gap-1.5 rounded-xl bg-slate-100 p-1">
-                    {(
-                      [
-                        { id: 'invoice', label: 'Invoice' },
-                        { id: 'brief', label: 'Project Brief' },
-                        { id: 'certificate', label: 'Certificate' },
-                      ] as const
-                    ).map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => setActiveTemplate(t.id)}
-                        className={`rounded-lg px-3.5 py-1.5 text-xs font-bold cursor-pointer ${
-                          activeTemplate === t.id
-                            ? 'bg-[#6D28D9] text-white'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleToggleWatermark}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                    >
+                      <Lock className="h-3.5 w-3.5" />
+                      <span>
+                        Watermark: {watermarkEnabled ? 'Locked ON (Untick Rs 1,200)' : 'Off'}
+                      </span>
+                    </button>
+                    <div className="flex gap-1.5 rounded-xl bg-slate-100 p-1">
+                      {(
+                        [
+                          { id: 'invoice', label: 'Invoice' },
+                          { id: 'brief', label: 'Project Brief' },
+                          { id: 'certificate', label: 'Certificate' },
+                        ] as const
+                      ).map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => setActiveTemplate(t.id)}
+                          className={`rounded-lg px-3.5 py-1.5 text-xs font-bold cursor-pointer ${
+                            activeTemplate === t.id
+                              ? 'bg-[#6D28D9] text-white'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -4900,6 +5024,81 @@ export default function App() {
               title="Compiled PDF Preview"
               className="h-full w-full flex-1 bg-white"
             />
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          Rs 1,200 Watermark & Stamp Unlock Modal
+         ==================================================================== */}
+      {showUnlockModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-3xl border border-purple-200 bg-white p-6 text-slate-900 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-100 text-amber-700">
+                  <Lock className="h-5 w-5" />
+                </span>
+                <div>
+                  <h2 className="font-display text-lg font-extrabold text-slate-900">
+                    Unlock Watermark Removal
+                  </h2>
+                  <p className="text-xs font-medium text-slate-500">
+                    ShMp3100 Tool PDFMR Pro License
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowUnlockModal(false)}
+                aria-label="Close unlock dialog"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50/80 p-4">
+              <div className="flex items-baseline justify-between">
+                <span className="text-xs font-bold text-amber-900">
+                  Untick Default Watermark &amp; Stamp
+                </span>
+                <span className="font-mono-tabular text-2xl font-extrabold text-[#6D28D9]">
+                  Rs 1,200
+                </span>
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-slate-700">
+                By default, the <span className="font-bold">{watermarkText}</span> watermark &amp; stamp stay locked ON across all PDFs. Upgrade for <span className="font-bold">Rs 1,200</span> to untick, customize, or remove watermark stamps.
+              </p>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-2.5 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowUnlockModal(false);
+                  notify(
+                    'success',
+                    'Contact ShMp3100 Studio (Rs 1,200 Pro Plan) to activate watermark removal.'
+                  );
+                }}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#6D28D9] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+              >
+                <ShieldCheck className="h-4 w-4" />
+                <span>Get Pro License · Rs 1,200</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowUnlockModal(false)}
+                className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Keep Default Stamp
+              </button>
+            </div>
           </div>
         </div>
       )}
