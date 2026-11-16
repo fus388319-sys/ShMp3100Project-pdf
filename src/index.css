@@ -32,9 +32,9 @@
 }
 
 .workspace-lavender-bg {
-  background-color: #ede9fe;
+  background-color: #1c1018;
   background-image:
-    linear-gradient(180deg, rgba(245, 243, 255, 0.42) 0%, rgba(237, 233, 254, 0.56) 100%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(245, 243, 255, 0.14) 100%),
     url('/assets/aistudio/bg_for_ShMp3100_tool_pdf_maker_9e0f2834.png');
   background-size: cover;
   background-position: center;

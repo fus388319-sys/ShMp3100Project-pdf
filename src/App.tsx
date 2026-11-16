@@ -3762,8 +3762,8 @@ export default function App() {
            MODE B: MAIN ALL-IN-ONE PDF WORKSPACE (EXACT MATCH TO image_633ed9b7.png)
            ==================================================================== */
         <>
-          {/* Crisp White Top Bar matching image_633ed9b7.png */}
-          <header className="sticky top-0 z-30 border-b border-purple-100 bg-white/95 backdrop-blur-md">
+          {/* Frosted Transparent Top Bar */}
+          <header className="sticky top-0 z-30 border-b border-white/40 bg-white/45 backdrop-blur-md">
             <div className="mx-auto flex max-w-[1280px] items-center justify-between gap-6 px-4 py-3.5 sm:px-6">
               {/* Zone 1: Brand Wordmark */}
               <button
@@ -3828,15 +3828,15 @@ export default function App() {
           {/* SECTION 1: ALL TOOLS (Exact layout & card grid from image_633ed9b7.png) */}
           {section === 'all-tools' && (
             <main className="mx-auto w-full max-w-[1220px] flex-1 space-y-10 px-4 py-8 sm:px-6">
-              {/* Hero Card */}
-              <section className="flex flex-col justify-between gap-6 rounded-3xl border border-purple-100 bg-white/95 p-7 shadow-sm sm:p-10 lg:flex-row lg:items-center">
+              {/* Hero Card (Transparent Glass) */}
+              <section className="flex flex-col justify-between gap-6 rounded-3xl border border-white/45 bg-white/38 p-7 shadow-lg backdrop-blur-md sm:p-10 lg:flex-row lg:items-center">
                 <div className="max-w-xl space-y-2.5">
-                  <h1 className="font-display text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
+                  <h1 className="font-display text-3xl font-extrabold tracking-tight text-slate-950 sm:text-4xl">
                     All-in-one PDF Workspace
                   </h1>
-                  <p className="text-sm leading-relaxed text-slate-600 sm:text-base">
+                  <p className="text-sm font-medium leading-relaxed text-slate-900 sm:text-base">
                     Convert images, scan documents with your camera, merge or split PDFs, rotate pages, and publish templates with your{' '}
-                    <span className="font-semibold text-[#6D28D9]">
+                    <span className="font-bold text-[#5B21B6]">
                       ShMp3100 Tool PDFMR
                     </span>{' '}
                     watermark—all inside one fast web app.
@@ -3854,9 +3854,9 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => openScanDocumentStudio('scan')}
-                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-800 shadow-xs transition-colors hover:bg-slate-50 cursor-pointer"
+                    className="inline-flex items-center gap-2 rounded-xl border border-white/60 bg-white/55 px-5 py-3 text-sm font-bold text-slate-900 shadow-xs backdrop-blur-sm transition-colors hover:bg-white/75 cursor-pointer"
                   >
-                    <Camera className="h-4 w-4 text-slate-700" />
+                    <Camera className="h-4 w-4 text-slate-800" />
                     <span>Scan Document</span>
                   </button>
                 </div>
@@ -3864,11 +3864,11 @@ export default function App() {
 
               {/* Convert & Create PDF */}
               <section className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
-                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/45 bg-white/38 px-4 py-2.5 shadow-sm backdrop-blur-md">
+                  <h2 className="font-display text-xl font-extrabold text-slate-950">
                     Convert &amp; Create PDF
                   </h2>
-                  <p className="text-xs font-semibold text-slate-600">
+                  <p className="text-xs font-semibold text-slate-800">
                     Select any tool to launch its workspace
                   </p>
                 </div>
@@ -3878,16 +3878,16 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setSection('image-scan')}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#6D28D9] text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#6D28D9] text-white shadow-sm">
                       <ImageIcon className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         Image to PDF
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         JPG, JPEG, PNG, GIF, BMP, WEBP · Choose &amp; Scan
                       </p>
                     </div>
@@ -3897,16 +3897,16 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => openScanDocumentStudio('scan')}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-600 text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-orange-600 text-white shadow-sm">
                       <Camera className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         Camera Scanner
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         Live auto-detect, auto-crop &amp; RGB finish
                       </p>
                     </div>
@@ -3916,16 +3916,16 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => handleOpenToolkitOption('txt-to-pdf')}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
                       <FileText className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         TXT &amp; Notes to PDF
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         Turn text notes into clean vector PDFs
                       </p>
                     </div>
@@ -3938,16 +3938,16 @@ export default function App() {
                       setActiveTemplate('invoice');
                       setSection('templates');
                     }}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm">
                       <Receipt className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         Invoice Generator
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         Editable line items with automatic totals
                       </p>
                     </div>
@@ -3960,16 +3960,16 @@ export default function App() {
                       setActiveTemplate('brief');
                       setSection('templates');
                     }}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm">
                       <Code2 className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         Project Brief PDF
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         Structured specification &amp; report sheet
                       </p>
                     </div>
@@ -3982,16 +3982,16 @@ export default function App() {
                       setActiveTemplate('certificate');
                       setSection('templates');
                     }}
-                    className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                    className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                   >
-                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-white">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-sky-600 text-white shadow-sm">
                       <Award className="h-5 w-5" />
                     </span>
                     <div className="min-w-0">
-                      <h3 className="font-display text-base font-bold text-slate-900">
+                      <h3 className="font-display text-base font-bold text-slate-950">
                         Certificate Maker
                       </h3>
-                      <p className="truncate text-xs text-slate-500">
+                      <p className="truncate text-xs font-medium text-slate-800">
                         Landscape bordered certificate press
                       </p>
                     </div>
@@ -4007,18 +4007,18 @@ export default function App() {
                         key={item.id}
                         type="button"
                         onClick={() => handleOpenToolkitOption(item.id)}
-                        className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                        className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                       >
                         <span
-                          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${item.badgeColor}`}
                         >
                           <Icon className="h-5 w-5" />
                         </span>
                         <div className="min-w-0">
-                          <h3 className="font-display text-base font-bold text-slate-900">
+                          <h3 className="font-display text-base font-bold text-slate-950">
                             {item.label}
                           </h3>
-                          <p className="truncate text-xs text-slate-500">
+                          <p className="truncate text-xs font-medium text-slate-800">
                             {item.description}
                           </p>
                         </div>
@@ -4030,11 +4030,11 @@ export default function App() {
 
               {/* Convert from PDF */}
               <section className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
-                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/45 bg-white/38 px-4 py-2.5 shadow-sm backdrop-blur-md">
+                  <h2 className="font-display text-xl font-extrabold text-slate-950">
                     Convert from PDF
                   </h2>
-                  <p className="text-xs font-semibold text-slate-600">
+                  <p className="text-xs font-semibold text-slate-800">
                     Extract text, images, tables &amp; slide decks
                   </p>
                 </div>
@@ -4048,18 +4048,18 @@ export default function App() {
                           key={item.id}
                           type="button"
                           onClick={() => handleOpenToolkitOption(item.id)}
-                          className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                          className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                         >
                           <span
-                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${item.badgeColor}`}
                           >
                             <Icon className="h-5 w-5" />
                           </span>
                           <div className="min-w-0">
-                            <h3 className="font-display text-base font-bold text-slate-900">
+                            <h3 className="font-display text-base font-bold text-slate-950">
                               {item.label}
                             </h3>
-                            <p className="truncate text-xs text-slate-500">
+                            <p className="truncate text-xs font-medium text-slate-800">
                               {item.description}
                             </p>
                           </div>
@@ -4072,11 +4072,11 @@ export default function App() {
 
               {/* Manage & Edit PDF */}
               <section className="space-y-4 pb-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/60 bg-white/88 px-4 py-2.5 backdrop-blur-md">
-                  <h2 className="font-display text-xl font-extrabold text-slate-900">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/45 bg-white/38 px-4 py-2.5 shadow-sm backdrop-blur-md">
+                  <h2 className="font-display text-xl font-extrabold text-slate-950">
                     Manage &amp; Edit PDF
                   </h2>
-                  <p className="text-xs font-semibold text-slate-600">
+                  <p className="text-xs font-semibold text-slate-800">
                     Client-side pdf-lib document engine
                   </p>
                 </div>
@@ -4090,18 +4090,18 @@ export default function App() {
                           key={item.id}
                           type="button"
                           onClick={() => handleOpenToolkitOption(item.id)}
-                          className="flex items-center gap-4 rounded-2xl border border-purple-100/90 bg-white p-5 text-left shadow-xs transition-all hover:border-violet-300 hover:shadow-md cursor-pointer"
+                          className="flex items-center gap-4 rounded-2xl border border-white/45 bg-white/35 p-5 text-left shadow-sm backdrop-blur-md transition-all hover:border-white/80 hover:bg-white/50 hover:shadow-md cursor-pointer"
                         >
                           <span
-                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white ${item.badgeColor}`}
+                            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${item.badgeColor}`}
                           >
                             <Icon className="h-5 w-5" />
                           </span>
                           <div className="min-w-0">
-                            <h3 className="font-display text-base font-bold text-slate-900">
+                            <h3 className="font-display text-base font-bold text-slate-950">
                               {item.label}
                             </h3>
-                            <p className="truncate text-xs text-slate-500">
+                            <p className="truncate text-xs font-medium text-slate-800">
                               {item.description}
                             </p>
                           </div>
@@ -4117,13 +4117,13 @@ export default function App() {
           {/* SECTION 2: IMAGE TO PDF (CHOOSE FILE) + APPLY SCAN DOCUMENT STUDIO */}
           {section === 'image-scan' && (
             <main className="mx-auto w-full max-w-[1160px] flex-1 space-y-6 px-4 py-8 sm:px-6">
-              <div className="rounded-3xl border border-purple-100 bg-white p-6 shadow-sm sm:p-8">
-                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-5">
+              <div className="rounded-3xl border border-white/45 bg-white/45 p-6 shadow-lg backdrop-blur-md sm:p-8">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/40 pb-5">
                   <div>
-                    <h1 className="font-display text-2xl font-extrabold text-slate-900">
+                    <h1 className="font-display text-2xl font-extrabold text-slate-950">
                       Image to PDF — Choose File &amp; Apply Scan Document
                     </h1>
-                    <p className="mt-1 text-xs text-slate-500 sm:text-sm">
+                    <p className="mt-1 text-xs font-medium text-slate-800 sm:text-sm">
                       Choose image files or launch Camera Scan, then apply automatic edge-crop, scan filters, 5 edit tools, auto-index, and RGB Finish PDF.
                     </p>
                   </div>
@@ -4146,15 +4146,15 @@ export default function App() {
                       handleImageFilesChosen(e.dataTransfer.files, false);
                     }
                   }}
-                  className="mt-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50/40 px-6 py-10 text-center"
+                  className="mt-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/60 bg-white/25 px-6 py-10 text-center backdrop-blur-sm"
                 >
                   <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#6D28D9] text-white shadow-sm">
                     <Upload className="h-6 w-6" />
                   </span>
-                  <h2 className="font-display mt-3 text-lg font-bold text-slate-900">
+                  <h2 className="font-display mt-3 text-lg font-bold text-slate-950">
                     Choose Document / Image Files
                   </h2>
-                  <p className="mt-1 text-xs text-slate-500">
+                  <p className="mt-1 text-xs font-medium text-slate-800">
                     Drag &amp; drop JPG, JPEG, PNG, GIF, BMP, or WEBP — auto-cropped automatically on upload
                   </p>
                   <div className="mt-4 flex flex-wrap justify-center gap-3">
@@ -4281,8 +4281,8 @@ export default function App() {
           {/* SECTION 3: PDF TOOLKIT (All Converters + Manage Tools) */}
           {section === 'toolkit' && (
             <main className="mx-auto w-full max-w-[1220px] flex-1 px-4 py-8 sm:px-6">
-              <div className="grid gap-6 rounded-3xl border border-purple-100 bg-white p-6 shadow-sm lg:grid-cols-[260px_1fr]">
-                <aside className="space-y-4 border-b border-slate-100 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-5">
+              <div className="grid gap-6 rounded-3xl border border-white/45 bg-white/48 p-6 shadow-lg backdrop-blur-md lg:grid-cols-[260px_1fr]">
+                <aside className="space-y-4 border-b border-white/40 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-5">
                   {(
                     [
                       'Convert to PDF',
@@ -4291,7 +4291,7 @@ export default function App() {
                     ] as const
                   ).map((groupName) => (
                     <div key={groupName} className="space-y-1">
-                      <p className="px-2 pb-1 text-[11px] font-bold text-slate-400">
+                      <p className="px-2 pb-1 text-[11px] font-bold text-slate-700">
                         {groupName}
                       </p>
                       {TOOLKIT_ITEMS.filter((t) => t.group === groupName).map((t) => {
@@ -4304,8 +4304,8 @@ export default function App() {
                             onClick={() => handleOpenToolkitOption(t.id)}
                             className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-xs font-bold transition-colors cursor-pointer ${
                               active
-                                ? 'bg-[#6D28D9] text-white'
-                                : 'text-slate-600 hover:bg-violet-50 hover:text-slate-900'
+                                ? 'bg-[#6D28D9] text-white shadow-sm'
+                                : 'text-slate-800 hover:bg-white/45 hover:text-slate-950'
                             }`}
                           >
                             <Icon className="h-4 w-4 shrink-0" />
@@ -4329,20 +4329,20 @@ export default function App() {
 
                     return (
                       <>
-                        <div className="border-b border-slate-100 pb-3">
-                          <h1 className="font-display text-xl font-extrabold text-slate-900">
+                        <div className="border-b border-white/40 pb-3">
+                          <h1 className="font-display text-xl font-extrabold text-slate-950">
                             {activeMeta?.label}
                           </h1>
-                          <p className="text-xs text-slate-500">
+                          <p className="text-xs font-medium text-slate-800">
                             {activeMeta?.description}
                           </p>
                         </div>
 
                         {isConvertToPdf ? (
                           <div className="space-y-4">
-                            <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-violet-200 bg-violet-50/40 px-6 py-7 text-center">
+                            <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-white/60 bg-white/25 px-6 py-7 text-center backdrop-blur-sm">
                               <Upload className="h-6 w-6 text-[#6D28D9]" />
-                              <p className="mt-2 text-xs font-semibold text-slate-700">
+                              <p className="mt-2 text-xs font-semibold text-slate-900">
                                 {sourceDocFile
                                   ? `Selected: ${sourceDocFile.name} (${formatBytes(sourceDocFile.size)})`
                                   : 'Choose a file (.docx, .pptx, .xlsx, .csv, .html, .txt) or paste content below'}
@@ -4773,7 +4773,7 @@ export default function App() {
           {/* SECTION 4: TEMPLATES (Invoice, Project Brief, Certificate) */}
           {section === 'templates' && (
             <main className="mx-auto w-full max-w-[1100px] flex-1 px-4 py-8 sm:px-6">
-              <div className="rounded-3xl border border-purple-100 bg-white p-6 shadow-sm sm:p-8">
+              <div className="rounded-3xl border border-white/45 bg-white/48 p-6 shadow-lg backdrop-blur-md sm:p-8">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-5">
                   <div>
                     <h1 className="font-display text-2xl font-extrabold text-slate-900">
