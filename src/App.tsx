@@ -750,8 +750,7 @@ async function compileScannedPdf(options: {
     options.margin === 'none' ? 0 : options.margin === 'compact' ? 8 : 14;
 
   let doc: jsPDF | null = null;
-  const indexOffset = options.includeIndex ? 1 : 0;
-  const totalPages = options.pages.length + indexOffset;
+  let indexOffset = 0;
 
   if (options.includeIndex) {
     const indexFormat = options.pageSize === 'letter' ? 'letter' : 'a4';
@@ -809,9 +808,15 @@ async function compileScannedPdf(options: {
             summary: `${p.category} · ${p.filter.toUpperCase()}`,
           }));
 
+    // Estimate index page count first for accurate target page numbering
+    const estimatedIndexPages = Math.max(1, Math.ceil(entries.length / 13));
+
     for (const entry of entries) {
-      if (y > ph - 26) break;
-      const targetPdfPage = entry.pageNumber + 1;
+      if (y > ph - 26) {
+        doc.addPage(indexFormat, 'portrait');
+        y = 24;
+      }
+      const targetPdfPage = entry.pageNumber + estimatedIndexPages;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10.5);
       doc.setTextColor(24, 24, 27);
@@ -838,23 +843,28 @@ async function compileScannedPdf(options: {
       y += 7;
     }
 
-    drawJsPdfWatermark(
-      doc,
-      pw,
-      ph,
-      options.watermarkEnabled,
-      options.watermarkText,
-      options.watermarkOpacity,
-      options.watermarkPlacement
-    );
-
-    if (options.pageNumbersEnabled) {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
-      doc.setTextColor(120, 120, 130);
-      doc.text(`1 / ${totalPages}`, pw - 14, ph - 9, { align: 'right' });
+    indexOffset = doc.getNumberOfPages();
+    const preliminaryTotal = options.pages.length + indexOffset;
+    for (let ip = 1; ip <= indexOffset; ip++) {
+      doc.setPage(ip);
+      drawJsPdfWatermark(
+        doc,
+        pw,
+        ph,
+        options.watermarkEnabled,
+        options.watermarkText,
+        options.watermarkOpacity,
+        options.watermarkPlacement
+      );
+      if (options.pageNumbersEnabled) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(120, 120, 130);
+        doc.text(`${ip} / ${preliminaryTotal}`, pw - 14, ph - 9, { align: 'right' });
+      }
     }
   }
+  const totalPages = options.pages.length + indexOffset;
 
   for (let i = 0; i < options.pages.length; i++) {
     const page = options.pages[i];
@@ -1297,6 +1307,15 @@ async function convertSourceToPdf(options: {
       doc.text(`ShMp3100 Tool PDFMR · Slide ${idx + 1} / ${slides.length}`, pw - 18, ph - 10, {
         align: 'right',
       });
+      drawJsPdfWatermark(
+        doc,
+        pw,
+        ph,
+        options.watermarkEnabled,
+        options.watermarkText,
+        options.watermarkOpacity,
+        'footer'
+      );
     });
 
     const outName = normalizePdfFilename(
@@ -1363,6 +1382,20 @@ async function convertSourceToPdf(options: {
       });
       y += 8;
     });
+
+    const totalSheetPages = doc.getNumberOfPages();
+    for (let i = 1; i <= totalSheetPages; i++) {
+      doc.setPage(i);
+      drawJsPdfWatermark(
+        doc,
+        pw,
+        ph,
+        options.watermarkEnabled,
+        options.watermarkText,
+        options.watermarkOpacity,
+        'footer'
+      );
+    }
 
     const outName = normalizePdfFilename(
       options.filename || sourceFile?.name.replace(/\.[^.]+$/, '') || 'Spreadsheet',
@@ -1604,7 +1637,7 @@ export default function App() {
   const [scanCategory, setScanCategory] = useState<ScanCategory>('Doc');
   const [editTab, setEditTab] = useState<EditTab>('crop');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [rgbModeScan, setRgbModeScan] = useState(false);
+  const [rgbModeScan, setRgbModeScan] = useState(true);
 
   // Camera & Auto-Detection State
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1613,6 +1646,7 @@ export default function App() {
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const docConvertInputRef = useRef<HTMLInputElement | null>(null);
+  const latestAddedPageIdRef = useRef<string | null>(null);
 
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraState, setCameraState] = useState<'idle' | 'active' | 'error'>('idle');
@@ -2047,20 +2081,21 @@ export default function App() {
         label,
       };
 
-      setPages((prev) => {
-        const next = [...prev, newPage];
-        setSelectedPageIdx(next.length - 1);
-        setIndexEntries((prevIdx) => [
-          ...prevIdx,
-          {
-            id: newId,
-            pageNumber: next.length,
-            heading: label || `${scanCategory} Page ${next.length}`,
-            summary: `${label} · Auto-cropped`,
-          },
-        ]);
-        return next;
-      });
+      latestAddedPageIdRef.current = newId;
+      setPages((prev) => [...prev, newPage]);
+      setIndexEntries((prevIdx) =>
+        prevIdx.some((e) => e.id === newId)
+          ? prevIdx
+          : [
+              ...prevIdx,
+              {
+                id: newId,
+                pageNumber: prevIdx.length + 1,
+                heading: label || `${scanCategory} Page ${prevIdx.length + 1}`,
+                summary: `${label} · Auto-cropped`,
+              },
+            ]
+      );
 
       if (runAi) {
         void refinePageWithAiInBackground(newId, rawUrl, scanCategory);
@@ -2068,6 +2103,23 @@ export default function App() {
     },
     [scanCategory, aiScanEnabled, refinePageWithAiInBackground]
   );
+
+  useEffect(() => {
+    if (pages.length === 0) {
+      setSelectedPageIdx(0);
+      return;
+    }
+    const targetId = latestAddedPageIdRef.current;
+    if (targetId) {
+      const idx = pages.findIndex((p) => p.id === targetId);
+      if (idx >= 0) {
+        setSelectedPageIdx(idx);
+        latestAddedPageIdRef.current = null;
+        return;
+      }
+    }
+    setSelectedPageIdx((cur) => Math.min(cur, pages.length - 1));
+  }, [pages]);
 
   const handleScanCapture = useCallback(
     async (forceAi = false) => {
@@ -2533,51 +2585,95 @@ export default function App() {
         const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
         const maxSample = Math.min(3, pdf.numPages);
         const imgs: { mimeType: string; dataBase64: string }[] = [];
+        const localLines: string[] = [];
+
         for (let p = 1; p <= maxSample; p++) {
           const page = await pdf.getPage(p);
-          const vp = page.getViewport({ scale: 1.2 });
+          const rawVp = page.getViewport({ scale: 1 });
+          const fitScale = Math.min(1.2, 640 / Math.max(rawVp.width, rawVp.height));
+          const vp = page.getViewport({ scale: fitScale });
           const c = document.createElement('canvas');
-          c.width = vp.width;
-          c.height = vp.height;
+          c.width = Math.max(1, Math.round(vp.width));
+          c.height = Math.max(1, Math.round(vp.height));
           const ctx = c.getContext('2d');
           if (ctx) {
             await page.render({ canvasContext: ctx, viewport: vp, canvas: c }).promise;
             imgs.push({
               mimeType: 'image/jpeg',
-              dataBase64: c.toDataURL('image/jpeg', 0.85).split(',')[1] || '',
+              dataBase64: c.toDataURL('image/jpeg', 0.72).split(',')[1] || '',
             });
           }
+          try {
+            const tc = await page.getTextContent();
+            const txt = tc.items
+              .map((it) => ('str' in it ? it.str : ''))
+              .join(' ')
+              .trim();
+            if (txt) localLines.push(`Page ${p}: ${txt.slice(0, 220)}`);
+          } catch {
+            // ignore text extraction issues
+          }
         }
-        const res = await fetch('/api/analyze-document', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ images: imgs, scanMode: 'PDF OCR' }),
-        });
-        if (!res.ok) throw new Error('OCR analysis request failed.');
-        const data = (await res.json()) as {
-          documentTitle?: string;
-          suggestedFilename?: string;
-          authorOrIssuer?: string;
-          indexEntries?: { pageNumber?: number; heading?: string; summary?: string }[];
-        };
-        const summaryText = [
-          `Detected Title: ${data.documentTitle || toolkitFiles[0].title}`,
-          `Suggested Filename: ${data.suggestedFilename || toolkitFiles[0].fileName}`,
-          `Issuer / Author: ${data.authorOrIssuer || 'Detected Document'}`,
-          '',
-          'Auto-Index Breakdown:',
-          ...(data.indexEntries || []).map(
-            (e) => `Page ${e.pageNumber}: ${e.heading} — ${e.summary || ''}`
-          ),
-        ].join('\n');
+
+        let summaryText = '';
+        let outFileName = `${toolkitFiles[0].fileName.replace(/\.pdf$/i, '')}_OCR_Index.txt`;
+        let detectedTitle = toolkitFiles[0].title;
+
+        try {
+          const ocrController = new AbortController();
+          const ocrTimer = window.setTimeout(() => ocrController.abort(), 10000);
+          let res: Response;
+          try {
+            res = await fetch('/api/analyze-document', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: ocrController.signal,
+              body: JSON.stringify({ images: imgs, scanMode: 'PDF OCR' }),
+            });
+          } finally {
+            window.clearTimeout(ocrTimer);
+          }
+          if (!res.ok) throw new Error('OCR service busy');
+          const data = (await res.json()) as {
+            documentTitle?: string;
+            suggestedFilename?: string;
+            authorOrIssuer?: string;
+            indexEntries?: { pageNumber?: number; heading?: string; summary?: string }[];
+          };
+          detectedTitle = data.documentTitle || toolkitFiles[0].title;
+          outFileName = `${data.suggestedFilename || 'OCR_Index'}.txt`;
+          summaryText = [
+            `Detected Title: ${detectedTitle}`,
+            `Suggested Filename: ${data.suggestedFilename || toolkitFiles[0].fileName}`,
+            `Issuer / Author: ${data.authorOrIssuer || 'Detected Document'}`,
+            '',
+            'Auto-Index Breakdown:',
+            ...(data.indexEntries || []).map(
+              (e) => `Page ${e.pageNumber}: ${e.heading} — ${e.summary || ''}`
+            ),
+          ].join('\n');
+          notify('success', `OCR detected "${detectedTitle}"!`);
+        } catch {
+          summaryText = [
+            `Document Title: ${toolkitFiles[0].title}`,
+            `Total Pages: ${pdf.numPages}`,
+            `Issuer / Author: ${toolkitFiles[0].author}`,
+            '',
+            'Local Text & Page Index Extraction:',
+            ...(localLines.length > 0
+              ? localLines
+              : Array.from({ length: pdf.numPages }, (_, i) => `Page ${i + 1}: Scanned image page`)),
+          ].join('\n');
+          notify('success', `Extracted local page index for ${toolkitFiles[0].fileName}.`);
+        }
+
         const txtBlob = new Blob([summaryText], { type: 'text/plain;charset=utf-8' });
         setConvertedOutput({
           title: `OCR & Auto-Index completed for ${toolkitFiles[0].fileName}`,
           textPreview: summaryText,
           downloadUrl: URL.createObjectURL(txtBlob),
-          downloadName: `${data.suggestedFilename || 'OCR_Index'}.txt`,
+          downloadName: outFileName,
         });
-        notify('success', `OCR detected "${data.documentTitle || toolkitFiles[0].title}"!`);
         return;
       }
 
@@ -2845,16 +2941,22 @@ export default function App() {
   };
 
   const removePageById = (id: string) => {
-    setPages((prev) => {
-      const next = prev.filter((p) => p.id !== id);
-      setSelectedPageIdx((cur) => Math.max(0, Math.min(cur, next.length - 1)));
-      return next;
-    });
+    const target = pages.find((p) => p.id === id);
+    if (target?.rawUrl?.startsWith('blob:')) {
+      URL.revokeObjectURL(target.rawUrl);
+    }
+    const nextPages = pages.filter((p) => p.id !== id);
+    setPages(nextPages);
+    setSelectedPageIdx((cur) => Math.max(0, Math.min(cur, nextPages.length - 1)));
     setIndexEntries((prev) =>
       prev
         .filter((e) => e.id !== id)
         .map((e, i) => ({ ...e, pageNumber: i + 1 }))
     );
+    if (nextPages.length === 0 && scanStudioActive && scanStep !== 'scan') {
+      setScanStep('scan');
+      notify('error', 'All pages removed — returned to Scan screen.');
+    }
   };
 
   const accentBorderColor = isRgbActive
@@ -3038,7 +3140,13 @@ export default function App() {
 
             {/* Clean Step Switcher Strip */}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/40 p-1 backdrop-blur-md">
+              <div
+                className={`flex items-center gap-1.5 rounded-2xl p-1.5 backdrop-blur-xl transition-all ${
+                  isRgbActive
+                    ? 'rgb-neon-bar'
+                    : 'border border-white/10 bg-black/40'
+                }`}
+              >
                 {(
                   [
                     { id: 'scan', label: '1. Scan' },
@@ -3057,12 +3165,14 @@ export default function App() {
                       if (s.id === 'finish') handleGoToFinishPdf();
                       else setScanStep(s.id);
                     }}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
+                    className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
                       scanStep === s.id
                         ? isRgbActive || s.id === 'finish'
-                          ? 'bg-gradient-to-r from-rose-500 via-emerald-400 to-cyan-400 text-black'
+                          ? 'bg-gradient-to-r from-rose-500 via-fuchsia-500 to-cyan-400 text-white shadow-[0_0_20px_rgba(34,211,238,0.65),0_0_32px_rgba(236,72,153,0.45)]'
                           : 'bg-[#DC2626] text-white shadow-[0_0_14px_rgba(220,38,38,0.55)]'
-                        : 'text-white/65 hover:text-white'
+                        : isRgbActive
+                          ? 'text-white/80 hover:bg-white/10 hover:text-cyan-200'
+                          : 'text-white/65 hover:text-white'
                     }`}
                   >
                     {s.label}
@@ -3096,10 +3206,10 @@ export default function App() {
             </div>
           </header>
 
-          {/* SCAN VIEWFINDER (BIG SCREEN + AI CAPTURE + AUTO-FOCUS + AUTO-CROP) */}
+          {/* SCAN VIEWFINDER (BIG DOCUMENT SCREEN + AI CAPTURE + AUTO-FOCUS + AUTO-CROP) */}
           {scanStep === 'scan' && (
-            <main className="relative z-20 mx-auto flex w-full max-w-[1440px] flex-1 flex-col items-center justify-between gap-4 px-3 py-3 sm:px-6 sm:py-4">
-              <div className="relative flex w-full max-w-[1320px] flex-1 flex-col items-center justify-center gap-3 sm:flex-row sm:gap-5">
+            <main className="relative z-20 mx-auto flex w-full max-w-[1440px] flex-1 flex-col items-center justify-between gap-3 px-3 py-2 sm:px-6 sm:py-3">
+              <div className="relative flex w-full max-w-[1320px] flex-1 flex-col items-center justify-center gap-4 sm:flex-row sm:gap-5">
                 <div
                   onClick={handleTapToFocus}
                   onDragOver={(e) => e.preventDefault()}
@@ -3109,7 +3219,11 @@ export default function App() {
                       handleImageFilesChosen(e.dataTransfer.files, true);
                     }
                   }}
-                  className="relative flex h-[64vh] min-h-[470px] max-h-[820px] w-full flex-1 items-center justify-center overflow-hidden rounded-3xl border border-white/15 bg-[#0A0506] shadow-[0_24px_80px_rgba(0,0,0,0.85)] cursor-crosshair"
+                  className={`relative flex h-[71vh] min-h-[500px] max-h-[880px] w-full max-w-[880px] flex-1 items-center justify-center overflow-hidden rounded-[36px] border-2 bg-[#07060d] sm:h-[74vh] sm:rounded-[44px] cursor-crosshair ${
+                    isRgbActive
+                      ? 'border-cyan-400/45 shadow-[0_0_38px_rgba(34,211,238,0.22),0_0_72px_rgba(168,85,247,0.2),0_24px_80px_rgba(0,0,0,0.88)]'
+                      : 'border-white/25 shadow-[0_24px_80px_rgba(0,0,0,0.85)]'
+                  }`}
                 >
                   <video
                     ref={videoRef}
@@ -3121,7 +3235,7 @@ export default function App() {
                   />
 
                   {/* Top Live Detection & Page Focus HUD */}
-                  <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex flex-wrap items-center justify-center gap-2 px-4 text-center">
+                  <div className="pointer-events-none absolute inset-x-0 top-5 z-20 flex flex-wrap items-center justify-center gap-2 px-6 text-center">
                     <p className="rounded-full border border-white/15 bg-black/65 px-3.5 py-1.5 text-xs font-semibold text-white/95 backdrop-blur-md">
                       {isAiProcessing
                         ? 'AI Detecting Page Edges & Auto-Cropping...'
@@ -3129,7 +3243,7 @@ export default function App() {
                           ? autoCapture
                             ? `Page Detected · Auto-Capture ${lockProgress}%`
                             : 'Page Edges Locked · Ready to Auto-Crop'
-                          : 'Point camera at document page · Tap anywhere to focus'}
+                          : 'Frame document page · Tap anywhere to focus'}
                     </p>
                     {cameraState === 'active' && (
                       <span
@@ -3161,23 +3275,23 @@ export default function App() {
                     aria-hidden="true"
                     className="pointer-events-none absolute z-10 transition-all duration-200"
                     style={{
-                      left: detectedBox ? `${detectedBox.x * 100}%` : '7%',
-                      top: detectedBox ? `${detectedBox.y * 100}%` : '8%',
-                      width: detectedBox ? `${detectedBox.w * 100}%` : '86%',
-                      height: detectedBox ? `${detectedBox.h * 100}%` : '84%',
+                      left: detectedBox ? `${detectedBox.x * 100}%` : '6%',
+                      top: detectedBox ? `${detectedBox.y * 100}%` : '10%',
+                      width: detectedBox ? `${detectedBox.w * 100}%` : '88%',
+                      height: detectedBox ? `${detectedBox.h * 100}%` : '80%',
                     }}
                   >
                     <span
-                      className={`absolute left-0 top-0 h-10 w-10 rounded-tl-xl border-l-[4px] border-t-[4px] ${accentBorderColor}`}
+                      className={`absolute left-0 top-0 h-10 w-10 rounded-tl-2xl border-l-[4px] border-t-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute right-0 top-0 h-10 w-10 rounded-tr-xl border-r-[4px] border-t-[4px] ${accentBorderColor}`}
+                      className={`absolute right-0 top-0 h-10 w-10 rounded-tr-2xl border-r-[4px] border-t-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute bottom-0 left-0 h-10 w-10 rounded-bl-xl border-b-[4px] border-l-[4px] ${accentBorderColor}`}
+                      className={`absolute bottom-0 left-0 h-10 w-10 rounded-bl-2xl border-b-[4px] border-l-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute bottom-0 right-0 h-10 w-10 rounded-br-xl border-b-[4px] border-r-[4px] ${accentBorderColor}`}
+                      className={`absolute bottom-0 right-0 h-10 w-10 rounded-br-2xl border-b-[4px] border-r-[4px] ${accentBorderColor}`}
                     />
                     <div
                       className={`animate-scan-sweep absolute inset-x-2 h-[3px] rounded-full ${
@@ -3206,9 +3320,33 @@ export default function App() {
                     </div>
                   )}
 
+                  {pages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedPageIdx(pages.length - 1);
+                        setScanStep('edit');
+                      }}
+                      className="absolute bottom-5 left-6 z-20 flex items-center gap-2.5 rounded-2xl border border-white/25 bg-black/75 p-2 pr-3.5 text-left text-white shadow-lg backdrop-blur-md transition-transform hover:scale-[1.03] cursor-pointer"
+                    >
+                      <img
+                        src={pages[pages.length - 1].processedUrl}
+                        alt="Latest scanned page"
+                        className="h-12 w-9 rounded-lg object-cover border border-white/20"
+                      />
+                      <div>
+                        <p className="text-xs font-bold leading-tight">
+                          View Scan ({pages.length})
+                        </p>
+                        <p className="text-[11px] text-cyan-300">Open &amp; Edit</p>
+                      </div>
+                    </button>
+                  )}
+
                   {cameraState === 'idle' && (
-                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/65 text-sm text-white/80">
-                      <RefreshCw className="h-6 w-6 animate-spin text-red-400" />
+                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/65 px-6 text-center text-sm text-white/80">
+                      <RefreshCw className="h-7 w-7 animate-spin text-red-400" />
                       <span>Starting HD auto-focus &amp; edge detection camera...</span>
                     </div>
                   )}
@@ -3216,16 +3354,26 @@ export default function App() {
                   {cameraState === 'error' && (
                     <div
                       onClick={(e) => e.stopPropagation()}
-                      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-[#100708]/95 p-8 text-center cursor-default"
+                      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5 bg-[#090712]/90 p-8 text-center sm:p-10 cursor-default"
                     >
-                      <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-red-500/35 bg-red-500/15">
-                        <Camera className="h-8 w-8 text-red-400" />
+                      <div
+                        className={`flex h-18 w-18 items-center justify-center rounded-2xl border ${
+                          isRgbActive
+                            ? 'border-cyan-400/50 bg-gradient-to-br from-rose-500/20 via-purple-500/20 to-cyan-500/20 shadow-[0_0_28px_rgba(34,211,238,0.45)]'
+                            : 'border-red-500/35 bg-red-500/15'
+                        }`}
+                      >
+                        <Camera
+                          className={`h-9 w-9 ${
+                            isRgbActive ? 'text-cyan-300' : 'text-red-400'
+                          }`}
+                        />
                       </div>
-                      <div className="max-w-md space-y-1.5">
-                        <h2 className="font-display text-lg font-bold text-white">
+                      <div className="max-w-lg space-y-2">
+                        <h2 className="font-display text-xl font-bold text-white sm:text-2xl">
                           Scan Document Viewfinder Ready
                         </h2>
-                        <p className="text-xs leading-relaxed text-white/75 sm:text-sm">
+                        <p className="text-sm leading-relaxed text-white/75 sm:text-base">
                           {cameraError}
                         </p>
                       </div>
@@ -3233,7 +3381,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => startCamera(facingMode)}
-                          className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/20 cursor-pointer"
+                          className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 px-5 py-3 text-xs font-bold text-white shadow-[0_0_16px_rgba(255,255,255,0.08)] hover:bg-white/20 sm:text-sm cursor-pointer"
                         >
                           <RefreshCw className="h-4 w-4" />
                           <span>Retry Camera</span>
@@ -3241,7 +3389,11 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => galleryInputRef.current?.click()}
-                          className="inline-flex items-center gap-2 rounded-xl bg-[#DC2626] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#B91C1C] cursor-pointer"
+                          className={`inline-flex items-center gap-2 rounded-xl px-5 py-3 text-xs font-bold text-white sm:text-sm cursor-pointer ${
+                            isRgbActive
+                              ? 'rgb-neon-cta hover:brightness-110'
+                              : 'bg-[#DC2626] hover:bg-[#B91C1C]'
+                          }`}
                         >
                           <Upload className="h-4 w-4" />
                           <span>Choose Document Image &amp; Auto-Crop</span>
@@ -3252,7 +3404,13 @@ export default function App() {
                 </div>
 
                 {/* Right Vertical Mode Rail */}
-                <div className="flex flex-row gap-2 overflow-x-auto rounded-2xl border border-white/12 bg-[#1B0D10]/85 p-2 shadow-xl backdrop-blur-xl sm:flex-col sm:gap-3">
+                <div
+                  className={`flex flex-row gap-2 overflow-x-auto rounded-2xl p-2 shadow-xl backdrop-blur-xl sm:flex-col sm:gap-3 ${
+                    isRgbActive
+                      ? 'rgb-neon-bar'
+                      : 'border border-white/12 bg-[#1B0D10]/85'
+                  }`}
+                >
                   {SCAN_CATEGORIES.map((cat) => {
                     const Icon = cat.icon;
                     const active = scanCategory === cat.id;
@@ -3267,7 +3425,7 @@ export default function App() {
                           className={`flex h-11 w-11 items-center justify-center rounded-full border transition-all ${
                             active
                               ? isRgbActive
-                                ? 'border-cyan-400 bg-cyan-500/20 text-white shadow-[0_0_16px_rgba(34,211,238,0.6)]'
+                                ? 'border-cyan-300 bg-gradient-to-br from-rose-500/80 via-fuchsia-500/80 to-cyan-400/90 text-white shadow-[0_0_20px_rgba(34,211,238,0.7),0_0_28px_rgba(236,72,153,0.45)]'
                                 : 'border-[#FF3B3B] bg-[#DC2626] text-white shadow-[0_0_18px_rgba(239,68,68,0.75)]'
                               : 'border-white/15 bg-white/5 text-white/70 hover:text-white'
                           }`}
@@ -3287,15 +3445,27 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Bottom Control Dock (Gallery · Auto-Focus · Merged AI SCAN [AI Crop + Auto-Cap] · Flash) */}
-              <div className="w-full max-w-[760px] space-y-2 pb-1">
-                <div className="relative flex items-center justify-between gap-2 rounded-3xl border border-white/12 bg-[#1A0D0F]/90 px-5 py-3 shadow-2xl backdrop-blur-xl sm:px-8">
+              {/* Bottom Control Dock (Gallery · Auto-Focus · Pages Count/View · Merged AI SCAN · Flash) */}
+              <div className="w-full max-w-[820px] space-y-2 pb-1">
+                <div
+                  className={`relative flex items-center justify-between gap-2 rounded-3xl px-4 py-3 backdrop-blur-xl sm:px-8 ${
+                    isRgbActive
+                      ? 'rgb-neon-dock'
+                      : 'border border-white/12 bg-[#1A0D0F]/90 shadow-2xl'
+                  }`}
+                >
                   <button
                     type="button"
                     onClick={() => galleryInputRef.current?.click()}
-                    className="flex flex-col items-center gap-1 text-white/85 transition-colors hover:text-white cursor-pointer"
+                    className="flex flex-col items-center gap-1 text-white/90 transition-all hover:text-cyan-200 cursor-pointer"
                   >
-                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5">
+                    <span
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border transition-all ${
+                        isRgbActive
+                          ? 'border-fuchsia-400/45 bg-fuchsia-500/15 shadow-[0_0_16px_rgba(217,70,239,0.4)] hover:shadow-[0_0_22px_rgba(34,211,238,0.65)]'
+                          : 'border-white/10 bg-white/5'
+                      }`}
+                    >
                       <ImageIcon className="h-5 w-5" />
                     </span>
                     <span className="text-[11px] font-semibold">Gallery</span>
@@ -3304,23 +3474,79 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setAutoFocusEnabled((v) => !v)}
-                    className={`flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                    className={`flex flex-col items-center gap-1 transition-all cursor-pointer ${
                       autoFocusEnabled
-                        ? 'text-emerald-300'
+                        ? 'text-cyan-200'
                         : 'text-white/75 hover:text-white'
                     }`}
                   >
                     <span
-                      className={`flex h-10 w-10 items-center justify-center rounded-xl border ${
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border transition-all ${
                         autoFocusEnabled
-                          ? 'border-emerald-400/50 bg-emerald-500/20'
-                          : 'border-white/10 bg-white/5'
+                          ? isRgbActive
+                            ? 'border-cyan-300/75 bg-gradient-to-br from-emerald-500/25 via-cyan-500/25 to-indigo-500/25 text-cyan-200 shadow-[0_0_20px_rgba(34,211,238,0.65),0_0_28px_rgba(16,185,129,0.45)]'
+                            : 'border-emerald-400/50 bg-emerald-500/20 text-emerald-300 shadow-[0_0_14px_rgba(16,185,129,0.45)]'
+                          : 'border-white/15 bg-white/5'
                       }`}
                     >
                       <Focus className="h-5 w-5" />
                     </span>
                     <span className="text-[11px] font-semibold">
                       {autoFocusEnabled ? 'Auto-Focus' : 'Manual'}
+                    </span>
+                  </button>
+
+                  {/* Page Viewer & Count Badge Button (Red-Box Slot between Auto-Focus & AI Scan) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (pages.length === 0) {
+                        notify(
+                          'error',
+                          'No pages yet — scan or upload an image first to view pages.'
+                        );
+                        return;
+                      }
+                      setScanStep('edit');
+                    }}
+                    title="View & manage scanned pages"
+                    className="group relative flex flex-col items-center gap-1 text-white/95 transition-all hover:scale-[1.04] cursor-pointer"
+                  >
+                    <span
+                      className={`relative flex h-10 w-10 items-center justify-center overflow-visible rounded-xl border transition-all ${
+                        pages.length > 0
+                          ? 'border-violet-300/80 bg-gradient-to-br from-rose-500/25 via-violet-500/30 to-cyan-400/25 shadow-[0_0_20px_rgba(168,85,247,0.65),0_0_26px_rgba(34,211,238,0.45)]'
+                          : isRgbActive
+                            ? 'border-cyan-400/50 bg-cyan-500/15 shadow-[0_0_16px_rgba(34,211,238,0.4)]'
+                            : 'border-white/15 bg-white/5'
+                      }`}
+                    >
+                      {pages.length > 0 ? (
+                        <img
+                          src={
+                            (pages[selectedPageIdx] || pages[pages.length - 1])
+                              .processedUrl
+                          }
+                          alt={`Page ${selectedPageIdx + 1} of ${pages.length}`}
+                          className="h-8 w-6 rounded object-cover border border-white/30"
+                        />
+                      ) : (
+                        <FileText className="h-5 w-5 text-cyan-200" />
+                      )}
+                      <span
+                        className={`font-mono-tabular absolute -right-2 -top-2 inline-flex min-w-[20px] items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-extrabold leading-none text-white ${
+                          pages.length > 0
+                            ? 'bg-gradient-to-r from-rose-500 via-fuchsia-500 to-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.85)]'
+                            : 'border border-cyan-400/60 bg-[#121024] text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.45)]'
+                        }`}
+                      >
+                        {pages.length}
+                      </span>
+                    </span>
+                    <span className="font-mono-tabular text-[11px] font-bold text-cyan-200">
+                      {pages.length > 0
+                        ? `P.${Math.min(selectedPageIdx + 1, pages.length)}/${pages.length}`
+                        : 'Pages (0)'}
                     </span>
                   </button>
 
@@ -3336,15 +3562,15 @@ export default function App() {
                         aria-hidden="true"
                         className={`absolute inset-0 rounded-full ${
                           isRgbActive || aiScanEnabled || autoCapture
-                            ? 'rgb-spectrum-glow shadow-[0_0_28px_rgba(34,211,238,0.65)]'
+                            ? 'rgb-spectrum-glow shadow-[0_0_32px_rgba(34,211,238,0.75),0_0_48px_rgba(236,72,153,0.45)]'
                             : 'bg-gradient-to-b from-[#FF5252] to-[#B91C1C] shadow-[0_0_32px_rgba(239,68,68,0.85)]'
                         }`}
                       />
-                      <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#1C0B0D] text-white">
+                      <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#0E0B1A] text-white">
                         {isCapturing ? (
                           <RefreshCw className="h-6 w-6 animate-spin text-cyan-300" />
                         ) : (
-                          <Wand2 className="h-6 w-6 text-cyan-300" />
+                          <Wand2 className="h-6 w-6 text-cyan-300 drop-shadow-[0_0_8px_rgba(34,211,238,0.85)]" />
                         )}
                         <span className="font-display mt-0.5 text-[11px] font-extrabold tracking-wider">
                           {isCapturing
@@ -3368,10 +3594,10 @@ export default function App() {
                             : 'AI Auto-Capture paused (AI Crop stays ON on tap).'
                         );
                       }}
-                      className={`relative z-10 -mt-3 inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold shadow-md transition-colors cursor-pointer ${
+                      className={`relative z-10 -mt-3 inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold transition-all cursor-pointer ${
                         autoCapture
-                          ? 'border-cyan-300 bg-cyan-500 text-slate-950'
-                          : 'border-white/25 bg-[#1C0B0D] text-cyan-200 hover:bg-white/15'
+                          ? 'border-cyan-300 bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400 text-slate-950 shadow-[0_0_16px_rgba(34,211,238,0.75)]'
+                          : 'border-cyan-400/50 bg-[#100D1F] text-cyan-200 shadow-[0_0_14px_rgba(34,211,238,0.35)] hover:bg-white/15'
                       }`}
                     >
                       <Sparkles className="h-2.5 w-2.5" />
@@ -3384,13 +3610,17 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setFlashOn((f) => !f)}
-                    className={`flex flex-col items-center gap-1 transition-colors cursor-pointer ${
-                      flashOn ? 'text-amber-300' : 'text-white/85 hover:text-white'
+                    className={`flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                      flashOn ? 'text-amber-300' : 'text-white/90 hover:text-amber-200'
                     }`}
                   >
                     <span
-                      className={`flex h-10 w-10 items-center justify-center rounded-xl ${
-                        flashOn ? 'bg-amber-400/20' : 'bg-white/5'
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border transition-all ${
+                        flashOn
+                          ? 'border-amber-300/75 bg-amber-400/20 shadow-[0_0_18px_rgba(251,191,36,0.6)]'
+                          : isRgbActive
+                            ? 'border-rose-400/45 bg-rose-500/15 shadow-[0_0_16px_rgba(244,63,94,0.35)]'
+                            : 'border-white/10 bg-white/5'
                       }`}
                     >
                       <Zap className="h-5 w-5" />
@@ -3401,13 +3631,15 @@ export default function App() {
                   </button>
                 </div>
 
-                <p className="text-center text-[11px] text-white/60">
+                <p className="text-center text-[11px] text-white/70">
                   AI Scanner (AI Crop + Auto-Cap):{' '}
                   <span className="font-semibold text-cyan-300">
                     {autoCapture ? 'Auto + AI Crop ON' : 'AI Crop ON'}
                   </span>{' '}
-                  · Mode: <span className="font-semibold text-white/85">{scanCategory}</span> ·{' '}
-                  {pages.length} page(s) captured
+                  · Mode: <span className="font-semibold text-white/90">{scanCategory}</span> ·{' '}
+                  <span className="font-mono-tabular font-semibold text-fuchsia-300">
+                    {pages.length} page(s)
+                  </span>
                 </p>
               </div>
             </main>
@@ -3964,6 +4196,40 @@ export default function App() {
                           className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/90 focus:border-red-400 focus:outline-none disabled:opacity-75"
                         />
                       )}
+
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {(['none', 'compact', 'standard'] as const).map((mg) => (
+                          <button
+                            key={mg}
+                            type="button"
+                            onClick={() => setMargin(mg)}
+                            className={`rounded-lg border py-1.5 text-xs font-bold capitalize cursor-pointer ${
+                              margin === mg
+                                ? 'border-cyan-400 bg-cyan-500/20 text-white'
+                                : 'border-white/10 bg-white/5 text-white/65'
+                            }`}
+                          >
+                            {mg} Margin
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {(['diagonal', 'footer'] as const).map((pos) => (
+                          <button
+                            key={pos}
+                            type="button"
+                            onClick={() => setWatermarkPlacement(pos)}
+                            className={`rounded-lg border py-1.5 text-xs font-bold capitalize cursor-pointer ${
+                              watermarkPlacement === pos
+                                ? 'border-violet-400 bg-violet-500/20 text-white'
+                                : 'border-white/10 bg-white/5 text-white/65'
+                            }`}
+                          >
+                            {pos} Stamp
+                          </button>
+                        ))}
+                      </div>
 
                       <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2">
                         <span className="text-xs font-semibold text-white">
@@ -4942,6 +5208,17 @@ export default function App() {
                                         sigCanvasRef.current.toDataURL('image/png')
                                       );
                                     }
+                                  }}
+                                  onPointerLeave={() => {
+                                    if (isDrawingSigRef.current && sigCanvasRef.current) {
+                                      isDrawingSigRef.current = false;
+                                      setSignatureDataUrl(
+                                        sigCanvasRef.current.toDataURL('image/png')
+                                      );
+                                    }
+                                  }}
+                                  onPointerCancel={() => {
+                                    isDrawingSigRef.current = false;
                                   }}
                                   className="h-28 w-full touch-none rounded-xl border border-slate-200 bg-white cursor-crosshair"
                                 />

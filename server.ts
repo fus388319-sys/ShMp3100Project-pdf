@@ -35,6 +35,7 @@ async function startServer() {
       const ai = new GoogleGenAI({
         apiKey,
         httpOptions: {
+          timeout: 12000,
           headers: {
             'User-Agent': 'aistudio-build',
           },
@@ -61,47 +62,65 @@ async function startServer() {
         `Identify the book name, document title, or receipt/ID header visible in the pages. ` +
         `Generate a clean concise filename (letters, numbers, underscores only, no extension) and create an accurate page-by-page index / table of contents for every provided page (1 to ${imageParts.length}).`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: {
-          parts: [...imageParts, { text: promptText }],
-        },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              documentTitle: {
-                type: Type.STRING,
-                description: 'Detected book title, document heading, or subject name.',
-              },
-              suggestedFilename: {
-                type: Type.STRING,
-                description: 'Clean filename without .pdf extension, using underscores.',
-              },
-              authorOrIssuer: {
-                type: Type.STRING,
-                description: 'Book author, publisher, store, or issuing organization if visible.',
-              },
-              indexEntries: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    pageNumber: { type: Type.INTEGER },
-                    heading: { type: Type.STRING },
-                    summary: { type: Type.STRING },
-                  },
+      const analyzeConfig = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            documentTitle: {
+              type: Type.STRING,
+              description: 'Detected book title, document heading, or subject name.',
+            },
+            suggestedFilename: {
+              type: Type.STRING,
+              description: 'Clean filename without .pdf extension, using underscores.',
+            },
+            authorOrIssuer: {
+              type: Type.STRING,
+              description: 'Book author, publisher, store, or issuing organization if visible.',
+            },
+            indexEntries: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  pageNumber: { type: Type.INTEGER },
+                  heading: { type: Type.STRING },
+                  summary: { type: Type.STRING },
                 },
               },
             },
           },
         },
-      });
+      };
 
-      const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: {
+            parts: [...imageParts, { text: promptText }],
+          },
+          config: {
+            ...analyzeConfig,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+          },
+        });
+      } catch {
+        response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: {
+            parts: [...imageParts, { text: promptText }],
+          },
+          config: {
+            ...analyzeConfig,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+      }
+
+      const rawText = (response.text ?? '{}').trim().replace(/^```json\s*|\s*```$/g, '');
+      const parsed = JSON.parse(rawText || '{}');
       return res.json(parsed);
     } catch (err) {
       console.error('Analyze document error:', err);
@@ -134,6 +153,7 @@ async function startServer() {
       const ai = new GoogleGenAI({
         apiKey,
         httpOptions: {
+          timeout: 12000,
           headers: {
             'User-Agent': 'aistudio-build',
           },
@@ -222,8 +242,8 @@ async function startServer() {
         });
       }
 
-      const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      const rawText = (response.text ?? '{}').trim().replace(/^```json\s*|\s*```$/g, '');
+      const parsed = JSON.parse(rawText || '{}');
       return res.json(parsed);
     } catch (err) {
       console.error('AI detect-crop error:', err);
