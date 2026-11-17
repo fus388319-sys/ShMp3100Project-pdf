@@ -554,41 +554,49 @@ async function requestAiDetectAndCrop(
   scanMode: ScanCategory
 ): Promise<AiDetectCropResponse> {
   let payloadUrl = imageUrl;
-  if (!payloadUrl.startsWith('data:image/')) {
-    const img = await readImageElement(imageUrl);
-    const maxDim = 1400;
-    const natW = img.naturalWidth || 1200;
-    const natH = img.naturalHeight || 1600;
-    const scale = Math.min(1, maxDim / Math.max(natW, natH));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(natW * scale));
-    canvas.height = Math.max(1, Math.round(natH * scale));
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      payloadUrl = canvas.toDataURL('image/jpeg', 0.88);
-    }
+  // Always resize down to 640px JPEG (q=0.72) for fast <1s AI edge detection
+  const img = await readImageElement(imageUrl);
+  const maxDim = 640;
+  const natW = img.naturalWidth || 1200;
+  const natH = img.naturalHeight || 1600;
+  const scale = Math.min(1, maxDim / Math.max(natW, natH));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(natW * scale));
+  canvas.height = Math.max(1, Math.round(natH * scale));
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    payloadUrl = canvas.toDataURL('image/jpeg', 0.72);
   }
+
   const commaIdx = payloadUrl.indexOf(',');
   const imageBase64 = commaIdx >= 0 ? payloadUrl.slice(commaIdx + 1) : payloadUrl;
-  const res = await fetch('/api/ai-detect-crop', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      imageBase64,
-      mimeType: 'image/jpeg',
-      scanMode,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(
-      typeof data?.error === 'string'
-        ? data.error
-        : 'AI document detection service failed.'
-    );
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch('/api/ai-detect-crop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        imageBase64,
+        mimeType: 'image/jpeg',
+        scanMode,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        typeof data?.error === 'string'
+          ? data.error
+          : 'AI document detection service failed.'
+      );
+    }
+    return data as AiDetectCropResponse;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
-  return data as AiDetectCropResponse;
 }
 
 async function renderProcessedPage(
@@ -608,9 +616,14 @@ async function renderProcessedPage(
   const sw = Math.max(40, Math.round(natW * (1 - crop.left - crop.right)));
   const sh = Math.max(40, Math.round(natH * (1 - crop.top - crop.bottom)));
 
+  // Cap output resolution to 1500px longest side for instant ~20ms canvas export
+  const capScale = Math.min(1, 1500 / Math.max(sw, sh));
+  const dw = Math.max(40, Math.round(sw * capScale));
+  const dh = Math.max(40, Math.round(sh * capScale));
+
   const swap = rotation === 90 || rotation === 270;
-  const outW = swap ? sh : sw;
-  const outH = swap ? sw : sh;
+  const outW = swap ? dh : dw;
+  const outH = swap ? dw : dh;
 
   const canvas = document.createElement('canvas');
   canvas.width = outW;
@@ -634,7 +647,7 @@ async function renderProcessedPage(
     filterStr = `grayscale(100%) brightness(${Math.min(155, brightness + 12)}%) contrast(${Math.min(200, contrast + 45)}%)`;
   }
   ctx.filter = filterStr;
-  ctx.drawImage(img, sx, sy, sw, sh, -sw / 2, -sh / 2, sw, sh);
+  ctx.drawImage(img, sx, sy, sw, sh, -dw / 2, -dh / 2, dw, dh);
   ctx.restore();
 
   if (filter === 'bw') {
@@ -1900,12 +1913,95 @@ export default function App() {
   // Image Upload / Camera Capture + Automatic Page Crop
   // ==========================================================================
 
+  const refinePageWithAiInBackground = useCallback(
+    async (pageId: string, rawUrl: string, category: ScanCategory) => {
+      setIsAiProcessing(true);
+      try {
+        const aiRes = await requestAiDetectAndCrop(rawUrl, category);
+        const clampCrop = (v: unknown) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? Math.min(0.42, Math.max(0, n)) : 0;
+        };
+        const aiCrop: CropBox = {
+          left: clampCrop(aiRes.left),
+          top: clampCrop(aiRes.top),
+          right: clampCrop(aiRes.right),
+          bottom: clampCrop(aiRes.bottom),
+        };
+        const hasValidCrop =
+          aiCrop.left + aiCrop.right < 0.78 && aiCrop.top + aiCrop.bottom < 0.78;
+        const aiFilter: ScanFilter =
+          aiRes.recommendedFilter === 'original' ||
+          aiRes.recommendedFilter === 'crisp' ||
+          aiRes.recommendedFilter === 'grayscale' ||
+          aiRes.recommendedFilter === 'bw'
+            ? aiRes.recommendedFilter
+            : category === 'Doc' || category === 'Receipt'
+              ? 'crisp'
+              : 'original';
+
+        if (!hasValidCrop && !aiRes.pageHeading?.trim()) return;
+
+        const rendered = hasValidCrop
+          ? await renderProcessedPage(rawUrl, aiCrop, 0, aiFilter, 104, 114)
+          : null;
+
+        setPages((prev) =>
+          prev.map((p) => {
+            if (p.id !== pageId) return p;
+            return {
+              ...p,
+              crop: hasValidCrop ? aiCrop : p.crop,
+              filter: aiFilter,
+              label: aiRes.pageHeading?.trim() || p.label,
+              processedUrl: rendered ? rendered.dataUrl : p.processedUrl,
+              width: rendered ? rendered.width : p.width,
+              height: rendered ? rendered.height : p.height,
+            };
+          })
+        );
+
+        if (aiRes.pageHeading?.trim()) {
+          const heading = aiRes.pageHeading.trim();
+          setIndexEntries((prev) =>
+            prev.map((e) =>
+              e.id === pageId
+                ? {
+                    ...e,
+                    heading,
+                    summary: `AI Auto-Cropped · Focus: ${aiRes.focusQuality || 'sharp'}`,
+                  }
+                : e
+            )
+          );
+        }
+
+        if (aiRes.documentTitle?.trim()) {
+          const cleanTitle = aiRes.documentTitle.trim();
+          setDocumentTitle((cur) => (cur === 'Scanned Document' ? cleanTitle : cur));
+          setFilename((cur) =>
+            cur === 'ShMp3100_Document'
+              ? cleanTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
+                'ShMp3100_Document'
+              : cur
+          );
+        }
+      } catch {
+        // Instant local auto-crop remains intact seamlessly
+      } finally {
+        setIsAiProcessing(false);
+      }
+    },
+    []
+  );
+
   const addRawImageAsScannedPage = useCallback(
     async (
       rawUrl: string,
       source: 'camera' | 'gallery',
       label: string,
-      presetBox?: DetectedBox | null
+      presetBox?: DetectedBox | null,
+      runAi = aiScanEnabled
     ) => {
       const localCrop: CropBox = presetBox
         ? {
@@ -1922,57 +2018,14 @@ export default function App() {
           }
         : await autoDetectCropBoxFromUrl(rawUrl);
 
-      let chosenCrop: CropBox = localCrop;
-      let chosenFilter: ScanFilter =
+      const defaultFilter: ScanFilter =
         scanCategory === 'Doc' || scanCategory === 'Receipt' ? 'crisp' : 'original';
-      let chosenLabel = label;
-      let usedAi = false;
-      let aiDocTitle: string | undefined;
-
-      if (aiScanEnabled) {
-        try {
-          const aiRes = await requestAiDetectAndCrop(rawUrl, scanCategory);
-          const clampCrop = (v: unknown) => {
-            const n = Number(v);
-            return Number.isFinite(n) ? Math.min(0.42, Math.max(0, n)) : 0;
-          };
-          const aiCrop: CropBox = {
-            left: clampCrop(aiRes.left),
-            top: clampCrop(aiRes.top),
-            right: clampCrop(aiRes.right),
-            bottom: clampCrop(aiRes.bottom),
-          };
-          if (
-            aiCrop.left + aiCrop.right < 0.78 &&
-            aiCrop.top + aiCrop.bottom < 0.78
-          ) {
-            chosenCrop = aiCrop;
-            usedAi = true;
-          }
-          if (
-            aiRes.recommendedFilter === 'original' ||
-            aiRes.recommendedFilter === 'crisp' ||
-            aiRes.recommendedFilter === 'grayscale' ||
-            aiRes.recommendedFilter === 'bw'
-          ) {
-            chosenFilter = aiRes.recommendedFilter;
-          }
-          if (aiRes.pageHeading?.trim()) {
-            chosenLabel = aiRes.pageHeading.trim();
-          }
-          if (aiRes.documentTitle?.trim()) {
-            aiDocTitle = aiRes.documentTitle.trim();
-          }
-        } catch {
-          // Graceful fallback to local autoDetectCropBoxFromUrl
-        }
-      }
 
       const rendered = await renderProcessedPage(
         rawUrl,
-        chosenCrop,
+        localCrop,
         0,
-        chosenFilter,
+        defaultFilter,
         104,
         112
       );
@@ -1985,13 +2038,13 @@ export default function App() {
         width: rendered.width,
         height: rendered.height,
         rotation: 0,
-        crop: chosenCrop,
-        filter: chosenFilter,
+        crop: localCrop,
+        filter: defaultFilter,
         brightness: 104,
         contrast: 112,
         category: scanCategory,
         source,
-        label: chosenLabel,
+        label,
       };
 
       setPages((prev) => {
@@ -2002,153 +2055,53 @@ export default function App() {
           {
             id: newId,
             pageNumber: next.length,
-            heading: chosenLabel || `${scanCategory} Page ${next.length}`,
-            summary: `${label} · ${usedAi ? 'AI Auto-Cropped' : 'Auto-cropped'}`,
+            heading: label || `${scanCategory} Page ${next.length}`,
+            summary: `${label} · Auto-cropped`,
           },
         ]);
-        if (aiDocTitle && prev.length === 0) {
-          setDocumentTitle(aiDocTitle);
-          setFilename(
-            aiDocTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
-              'ShMp3100_Document'
-          );
-        }
         return next;
       });
+
+      if (runAi) {
+        void refinePageWithAiInBackground(newId, rawUrl, scanCategory);
+      }
     },
-    [scanCategory, aiScanEnabled]
+    [scanCategory, aiScanEnabled, refinePageWithAiInBackground]
   );
 
   const handleScanCapture = useCallback(
     async (forceAi = false) => {
+      if (isCapturing) return;
       const video = videoRef.current;
-      if (!video || cameraState !== 'active' || isCapturing) return;
+      if (!video || cameraState !== 'active') {
+        galleryInputRef.current?.click();
+        return;
+      }
 
       setIsCapturing(true);
       setLockProgress(0);
-      const useAi = forceAi || aiScanEnabled;
-      if (useAi) setIsAiProcessing(true);
-
       try {
-        const w = video.videoWidth || 1920;
-        const h = video.videoHeight || 1440;
+        const w = video.videoWidth || 1280;
+        const h = video.videoHeight || 960;
         const canvas = document.createElement('canvas');
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         ctx.drawImage(video, 0, 0, w, h);
-        const rawUrl = canvas.toDataURL('image/jpeg', 0.94);
-
-        if (useAi) {
-          try {
-            const aiRes = await requestAiDetectAndCrop(rawUrl, scanCategory);
-            const clampCrop = (v: unknown) => {
-              const n = Number(v);
-              return Number.isFinite(n) ? Math.min(0.42, Math.max(0, n)) : 0;
-            };
-            const aiCrop: CropBox = {
-              left: clampCrop(aiRes.left),
-              top: clampCrop(aiRes.top),
-              right: clampCrop(aiRes.right),
-              bottom: clampCrop(aiRes.bottom),
-            };
-            const validCrop =
-              aiCrop.left + aiCrop.right < 0.78 && aiCrop.top + aiCrop.bottom < 0.78
-                ? aiCrop
-                : await autoDetectCropBoxFromUrl(rawUrl);
-
-            const aiFilter: ScanFilter =
-              aiRes.recommendedFilter === 'original' ||
-              aiRes.recommendedFilter === 'crisp' ||
-              aiRes.recommendedFilter === 'grayscale' ||
-              aiRes.recommendedFilter === 'bw'
-                ? aiRes.recommendedFilter
-                : scanCategory === 'Doc' || scanCategory === 'Receipt'
-                  ? 'crisp'
-                  : 'original';
-
-            const rendered = await renderProcessedPage(
-              rawUrl,
-              validCrop,
-              0,
-              aiFilter,
-              104,
-              114
-            );
-            const pageLabel =
-              aiRes.pageHeading?.trim() || `${scanCategory}_AI_Scan_${pages.length + 1}`;
-            const newId = `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-            const newPage: ScannedPage = {
-              id: newId,
-              rawUrl,
-              processedUrl: rendered.dataUrl,
-              width: rendered.width,
-              height: rendered.height,
-              rotation: 0,
-              crop: validCrop,
-              filter: aiFilter,
-              brightness: 104,
-              contrast: 114,
-              category: scanCategory,
-              source: 'camera',
-              label: pageLabel,
-            };
-            setPages((prev) => {
-              const next = [...prev, newPage];
-              setSelectedPageIdx(next.length - 1);
-              setIndexEntries((prevIdx) => [
-                ...prevIdx,
-                {
-                  id: newId,
-                  pageNumber: next.length,
-                  heading: pageLabel,
-                  summary: `AI Auto-Cropped · Focus: ${aiRes.focusQuality || 'sharp'}`,
-                },
-              ]);
-              return next;
-            });
-            if (aiRes.documentTitle?.trim() && pages.length === 0) {
-              const cleanTitle = aiRes.documentTitle.trim();
-              setDocumentTitle(cleanTitle);
-              setFilename(
-                cleanTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
-                  'ShMp3100_Document'
-              );
-            }
-            notify(
-              'success',
-              `AI captured & auto-cropped page ${pages.length + 1} (${aiRes.focusQuality || 'sharp'} focus)!`
-            );
-            return;
-          } catch (aiErr) {
-            const msg =
-              aiErr instanceof Error ? aiErr.message : 'AI crop unavailable';
-            await addRawImageAsScannedPage(
-              rawUrl,
-              'camera',
-              `${scanCategory}_Scan_${pages.length + 1}`,
-              detectedBox
-            );
-            notify(
-              'error',
-              `${msg} Saved page ${pages.length + 1} using local auto-crop.`
-            );
-            return;
-          }
-        }
+        const rawUrl = canvas.toDataURL('image/jpeg', 0.9);
 
         await addRawImageAsScannedPage(
           rawUrl,
           'camera',
           `${scanCategory}_Scan_${pages.length + 1}`,
-          detectedBox
+          detectedBox,
+          forceAi || aiScanEnabled
         );
         notify('success', `Captured & auto-cropped page ${pages.length + 1}!`);
       } catch {
         notify('error', 'Failed to capture scanned page.');
       } finally {
-        setIsAiProcessing(false);
         setIsCapturing(false);
       }
     },
@@ -2172,47 +2125,43 @@ export default function App() {
       scanStep === 'scan' &&
       !isCapturing
     ) {
-      handleScanCapture();
+      handleScanCapture(true);
     }
   }, [lockProgress, autoCapture, scanStudioActive, scanStep, isCapturing, handleScanCapture]);
 
   const handleImageFilesChosen = useCallback(
     async (rawFiles: FileList | File[], openStudioEdit = false) => {
       const list = Array.from(rawFiles);
-      let addedCount = 0;
+      const validFiles: File[] = [];
       let skipped = 0;
-      if (aiScanEnabled) setIsAiProcessing(true);
 
-      try {
-        for (const file of list) {
-          const ext = file.name.split('.').pop()?.toLowerCase() || '';
-          const ok =
-            ACCEPTED_IMAGE_MIME.has(file.type.toLowerCase()) ||
-            ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
-          if (!ok) {
-            skipped++;
-            continue;
-          }
-          try {
-            const rawUrl = URL.createObjectURL(file);
-            await addRawImageAsScannedPage(
-              rawUrl,
-              'gallery',
-              file.name.replace(/\.[^.]+$/, '')
-            );
-            addedCount++;
-          } catch {
-            skipped++;
-          }
-        }
-      } finally {
-        setIsAiProcessing(false);
+      for (const file of list) {
+        const ext = file.name.split('.').pop()?.toLowerCase() || '';
+        const ok =
+          ACCEPTED_IMAGE_MIME.has(file.type.toLowerCase()) ||
+          ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
+        if (!ok) skipped++;
+        else validFiles.push(file);
       }
+
+      const results = await Promise.allSettled(
+        validFiles.map((file) => {
+          const rawUrl = URL.createObjectURL(file);
+          return addRawImageAsScannedPage(
+            rawUrl,
+            'gallery',
+            file.name.replace(/\.[^.]+$/, '')
+          );
+        })
+      );
+
+      const addedCount = results.filter((r) => r.status === 'fulfilled').length;
+      skipped += results.length - addedCount;
 
       if (addedCount > 0) {
         notify(
           'success',
-          `${aiScanEnabled ? 'AI auto-cropped' : 'Added & auto-cropped'} ${addedCount} ${addedCount === 1 ? 'document image' : 'document images'}.`
+          `${aiScanEnabled ? 'AI auto-cropped' : 'Auto-cropped'} ${addedCount} ${addedCount === 1 ? 'document image' : 'document images'}.`
         );
         if (openStudioEdit) {
           setScanStudioActive(true);
@@ -2309,15 +2258,35 @@ export default function App() {
   const handleAutoAnalyzeAndIndex = useCallback(async () => {
     if (pages.length === 0 || isAnalyzing) return;
     setIsAnalyzing(true);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 7000);
     try {
-      const payloadImages = pages.slice(0, 4).map((p) => ({
-        mimeType: 'image/jpeg',
-        dataBase64: p.processedUrl.split(',')[1] || '',
-      }));
+      const payloadImages = await Promise.all(
+        pages.slice(0, 4).map(async (p) => {
+          try {
+            const img = await readImageElement(p.processedUrl);
+            const scale = Math.min(1, 640 / Math.max(img.naturalWidth || 640, img.naturalHeight || 640));
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, Math.round((img.naturalWidth || 640) * scale));
+            c.height = Math.max(1, Math.round((img.naturalHeight || 640) * scale));
+            c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height);
+            return {
+              mimeType: 'image/jpeg',
+              dataBase64: c.toDataURL('image/jpeg', 0.72).split(',')[1] || '',
+            };
+          } catch {
+            return {
+              mimeType: 'image/jpeg',
+              dataBase64: p.processedUrl.split(',')[1] || '',
+            };
+          }
+        })
+      );
 
       const res = await fetch('/api/analyze-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           images: payloadImages,
           scanMode: scanCategory,
@@ -2379,6 +2348,7 @@ export default function App() {
       setIncludeIndex(true);
       notify('success', `Auto-indexed ${pages.length} pages and updated filename.`);
     } finally {
+      window.clearTimeout(timeoutId);
       setIsAnalyzing(false);
     }
   }, [pages, isAnalyzing, scanCategory, notify]);
@@ -3359,8 +3329,8 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => handleScanCapture(true)}
-                      disabled={cameraState !== 'active' || isCapturing}
-                      className="relative flex h-24 w-24 items-center justify-center rounded-full p-[3px] transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
+                      disabled={isCapturing}
+                      className="relative flex h-24 w-24 items-center justify-center rounded-full p-[3px] transition-transform active:scale-95 disabled:opacity-60 cursor-pointer"
                     >
                       <span
                         aria-hidden="true"
@@ -3371,13 +3341,17 @@ export default function App() {
                         }`}
                       />
                       <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#1C0B0D] text-white">
-                        {isAiProcessing ? (
+                        {isCapturing ? (
                           <RefreshCw className="h-6 w-6 animate-spin text-cyan-300" />
                         ) : (
                           <Wand2 className="h-6 w-6 text-cyan-300" />
                         )}
                         <span className="font-display mt-0.5 text-[11px] font-extrabold tracking-wider">
-                          {isCapturing ? 'AI...' : 'AI SCAN'}
+                          {isCapturing
+                            ? 'SAVING'
+                            : cameraState === 'active'
+                              ? 'AI SCAN'
+                              : 'AI UPLOAD'}
                         </span>
                       </span>
                     </button>

@@ -67,6 +67,7 @@ async function startServer() {
           parts: [...imageParts, { text: promptText }],
         },
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -142,68 +143,91 @@ async function startServer() {
       const scanModeLabel = typeof body?.scanMode === 'string' ? body.scanMode : 'Doc';
 
       const promptText =
-        `Inspect this captured camera frame in "${scanModeLabel}" scan mode. ` +
-        `Locate the outer four edges of the physical document/book/page/receipt/ID card inside the frame. ` +
-        `Return normalized inset crop fractions (0.0 to 0.42) from each edge of the image (left, top, right, bottom) to tightly crop out background desk/table and keep only the clean page. ` +
-        `Also assess focusQuality ("sharp", "moderate", or "blurry"), whether a document is clearly present (documentDetected), a short pageHeading, documentTitle, and recommendedFilter ("original", "crisp", "grayscale", or "bw").`;
+        `Inspect this "${scanModeLabel}" scan frame. Return tight edge crop fractions (0 to 0.42) from left, top, right, bottom around the page, focusQuality ("sharp"|"moderate"|"blurry"), documentDetected, short pageHeading, documentTitle, and recommendedFilter ("original"|"crisp"|"grayscale"|"bw").`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: body?.mimeType || 'image/jpeg',
-                data: imageBase64,
-              },
+      const schemaConfig = {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            documentDetected: { type: Type.BOOLEAN },
+            focusQuality: {
+              type: Type.STRING,
+              description: 'One of: sharp, moderate, blurry',
             },
-            { text: promptText },
-          ],
-        },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              documentDetected: { type: Type.BOOLEAN },
-              focusQuality: {
-                type: Type.STRING,
-                description: 'One of: sharp, moderate, blurry',
-              },
-              left: {
-                type: Type.NUMBER,
-                description: 'Fraction of image width to trim from the left edge (0 to 0.42)',
-              },
-              top: {
-                type: Type.NUMBER,
-                description: 'Fraction of image height to trim from the top edge (0 to 0.42)',
-              },
-              right: {
-                type: Type.NUMBER,
-                description: 'Fraction of image width to trim from the right edge (0 to 0.42)',
-              },
-              bottom: {
-                type: Type.NUMBER,
-                description: 'Fraction of image height to trim from the bottom edge (0 to 0.42)',
-              },
-              documentTitle: { type: Type.STRING },
-              pageHeading: { type: Type.STRING },
-              recommendedFilter: {
-                type: Type.STRING,
-                description: 'One of: original, crisp, grayscale, bw',
-              },
+            left: {
+              type: Type.NUMBER,
+              description: 'Fraction of image width to trim from the left edge (0 to 0.42)',
+            },
+            top: {
+              type: Type.NUMBER,
+              description: 'Fraction of image height to trim from the top edge (0 to 0.42)',
+            },
+            right: {
+              type: Type.NUMBER,
+              description: 'Fraction of image width to trim from the right edge (0 to 0.42)',
+            },
+            bottom: {
+              type: Type.NUMBER,
+              description: 'Fraction of image height to trim from the bottom edge (0 to 0.42)',
+            },
+            documentTitle: { type: Type.STRING },
+            pageHeading: { type: Type.STRING },
+            recommendedFilter: {
+              type: Type.STRING,
+              description: 'One of: original, crisp, grayscale, bw',
             },
           },
         },
-      });
+      };
+
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: body?.mimeType || 'image/jpeg',
+                  data: imageBase64,
+                },
+              },
+              { text: promptText },
+            ],
+          },
+          config: {
+            ...schemaConfig,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+          },
+        });
+      } catch {
+        response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: body?.mimeType || 'image/jpeg',
+                  data: imageBase64,
+                },
+              },
+              { text: promptText },
+            ],
+          },
+          config: {
+            ...schemaConfig,
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+      }
 
       const rawText = (response.text ?? '{}').trim();
       const parsed = JSON.parse(rawText);
       return res.json(parsed);
     } catch (err) {
       console.error('AI detect-crop error:', err);
-      return res.status(500).json({
+      return res.status(503).json({
         error: err instanceof Error ? err.message : 'AI page detection failed.',
       });
     }
