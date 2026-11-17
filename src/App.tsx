@@ -17,6 +17,7 @@ import {
   Code2,
   CreditCard,
   Crop,
+  Crosshair,
   Download,
   Eye,
   FileCheck2,
@@ -25,6 +26,7 @@ import {
   FilePlus2,
   FileSpreadsheet,
   FileText,
+  Focus,
   Hash,
   Image as ImageIcon,
   Layers,
@@ -495,6 +497,98 @@ async function autoDetectCropBoxFromUrl(src: string): Promise<CropBox> {
     right: Math.min(0.35, Math.max(0, Number((1 - (box.x + box.w)).toFixed(3)))),
     bottom: Math.min(0.35, Math.max(0, Number((1 - (box.y + box.h)).toFixed(3)))),
   };
+}
+
+function computeFrameFocusScore(
+  canvas: HTMLCanvasElement,
+  box: DetectedBox | null
+): number {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return 0;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w < 32 || h < 32) return 0;
+
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const startX = Math.max(2, Math.floor((box ? box.x : 0.18) * w));
+  const endX = Math.min(w - 2, Math.floor((box ? box.x + box.w : 0.82) * w));
+  const startY = Math.max(2, Math.floor((box ? box.y : 0.18) * h));
+  const endY = Math.min(h - 2, Math.floor((box ? box.y + box.h : 0.82) * h));
+
+  let gradSum = 0;
+  let count = 0;
+  for (let y = startY; y < endY; y += 2) {
+    for (let x = startX; x < endX; x += 2) {
+      const idx = (y * w + x) * 4;
+      const rightIdx = (y * w + (x + 1)) * 4;
+      const downIdx = ((y + 1) * w + x) * 4;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      const lumR =
+        0.299 * data[rightIdx] + 0.587 * data[rightIdx + 1] + 0.114 * data[rightIdx + 2];
+      const lumD =
+        0.299 * data[downIdx] + 0.587 * data[downIdx + 1] + 0.114 * data[downIdx + 2];
+      gradSum += Math.abs(lum - lumR) + Math.abs(lum - lumD);
+      count++;
+    }
+  }
+
+  if (count === 0) return 0;
+  const avgGrad = gradSum / count;
+  return Math.min(100, Math.max(0, Math.round((avgGrad / 22) * 100)));
+}
+
+interface AiDetectCropResponse {
+  documentDetected?: boolean;
+  focusQuality?: 'sharp' | 'moderate' | 'blurry';
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+  documentTitle?: string;
+  pageHeading?: string;
+  recommendedFilter?: ScanFilter;
+}
+
+async function requestAiDetectAndCrop(
+  imageUrl: string,
+  scanMode: ScanCategory
+): Promise<AiDetectCropResponse> {
+  let payloadUrl = imageUrl;
+  if (!payloadUrl.startsWith('data:image/')) {
+    const img = await readImageElement(imageUrl);
+    const maxDim = 1400;
+    const natW = img.naturalWidth || 1200;
+    const natH = img.naturalHeight || 1600;
+    const scale = Math.min(1, maxDim / Math.max(natW, natH));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(natW * scale));
+    canvas.height = Math.max(1, Math.round(natH * scale));
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      payloadUrl = canvas.toDataURL('image/jpeg', 0.88);
+    }
+  }
+  const commaIdx = payloadUrl.indexOf(',');
+  const imageBase64 = commaIdx >= 0 ? payloadUrl.slice(commaIdx + 1) : payloadUrl;
+  const res = await fetch('/api/ai-detect-crop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      imageBase64,
+      mimeType: 'image/jpeg',
+      scanMode,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data?.error === 'string'
+        ? data.error
+        : 'AI document detection service failed.'
+    );
+  }
+  return data as AiDetectCropResponse;
 }
 
 async function renderProcessedPage(
@@ -1512,9 +1606,18 @@ export default function App() {
   const [cameraError, setCameraError] = useState('');
   const [flashOn, setFlashOn] = useState(false);
   const [autoCapture, setAutoCapture] = useState(false);
+  const [aiScanEnabled, setAiScanEnabled] = useState(true);
+  const [autoFocusEnabled, setAutoFocusEnabled] = useState(true);
   const [detectedBox, setDetectedBox] = useState<DetectedBox | null>(null);
+  const [focusScore, setFocusScore] = useState(0);
+  const [focusReticle, setFocusReticle] = useState<{
+    x: number;
+    y: number;
+    locking: boolean;
+  } | null>(null);
   const [lockProgress, setLockProgress] = useState(0);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
 
   // Image-to-PDF / Scanned Pages Queue
   const [pages, setPages] = useState<ScannedPage[]>([]);
@@ -1651,12 +1754,25 @@ export default function App() {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: facing },
-            width: { ideal: 1600 },
-            height: { ideal: 1200 },
+            width: { ideal: 1920 },
+            height: { ideal: 1440 },
           },
           audio: false,
         });
         streamRef.current = stream;
+        const track = stream.getVideoTracks()[0];
+        if (track && autoFocusEnabled) {
+          const caps = track.getCapabilities?.() as
+            | (MediaTrackCapabilities & { focusMode?: string[] })
+            | undefined;
+          if (caps?.focusMode?.includes('continuous')) {
+            track
+              .applyConstraints({
+                advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+              })
+              .catch(() => {});
+          }
+        }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
@@ -1671,7 +1787,42 @@ export default function App() {
         );
       }
     },
-    [stopCamera]
+    [stopCamera, autoFocusEnabled]
+  );
+
+  const handleTapToFocus = useCallback(
+    async (e: React.MouseEvent<HTMLDivElement>) => {
+      if (cameraState !== 'active') return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = Math.min(0.92, Math.max(0.08, (e.clientX - rect.left) / rect.width));
+      const y = Math.min(0.92, Math.max(0.08, (e.clientY - rect.top) / rect.height));
+      setFocusReticle({ x, y, locking: true });
+
+      const track = streamRef.current?.getVideoTracks()?.[0];
+      if (track) {
+        const caps = track.getCapabilities?.() as
+          | (MediaTrackCapabilities & { focusMode?: string[]; pointsOfInterest?: boolean })
+          | undefined;
+        try {
+          const adv: Record<string, unknown> = {};
+          if (caps?.focusMode?.includes('single-shot')) adv.focusMode = 'single-shot';
+          else if (caps?.focusMode?.includes('continuous')) adv.focusMode = 'continuous';
+          if (caps?.pointsOfInterest) adv.pointsOfInterest = [{ x, y }];
+          if (Object.keys(adv).length > 0) {
+            await track.applyConstraints({
+              advanced: [adv as MediaTrackConstraintSet],
+            });
+          }
+        } catch {
+          // Ignore unsupported browser constraints; visual reticle + sharpness meter still run
+        }
+      }
+
+      window.setTimeout(() => {
+        setFocusReticle((prev) => (prev ? { ...prev, locking: false } : null));
+      }, 650);
+    },
+    [cameraState]
   );
 
   useEffect(() => {
@@ -1680,6 +1831,8 @@ export default function App() {
     } else {
       stopCamera();
       setDetectedBox(null);
+      setFocusScore(0);
+      setFocusReticle(null);
       setLockProgress(0);
     }
     return () => stopCamera();
@@ -1713,9 +1866,9 @@ export default function App() {
         detectCanvasRef.current = document.createElement('canvas');
       }
       const c = detectCanvasRef.current;
-      const sampleW = 160;
+      const sampleW = 192;
       const sampleH = Math.max(
-        100,
+        112,
         Math.round(sampleW * (video.videoHeight / video.videoWidth))
       );
       if (c.width !== sampleW || c.height !== sampleH) {
@@ -1728,8 +1881,12 @@ export default function App() {
       ctx.drawImage(video, 0, 0, sampleW, sampleH);
 
       const box = detectDocumentBoundsFromCanvas(c);
+      const sharpness = computeFrameFocusScore(c, box);
       setDetectedBox(box);
-      if (box && autoCapture && !isCapturing) {
+      setFocusScore(sharpness);
+
+      const focusOk = !autoFocusEnabled || sharpness >= 34;
+      if (box && focusOk && autoCapture && !isCapturing) {
         setLockProgress((p) => Math.min(100, p + 25));
       } else {
         setLockProgress(0);
@@ -1737,7 +1894,7 @@ export default function App() {
     }, 220);
 
     return () => window.clearInterval(timer);
-  }, [scanStudioActive, scanStep, cameraState, autoCapture, isCapturing]);
+  }, [scanStudioActive, scanStep, cameraState, autoCapture, autoFocusEnabled, isCapturing]);
 
   // ==========================================================================
   // Image Upload / Camera Capture + Automatic Page Crop
@@ -1750,7 +1907,7 @@ export default function App() {
       label: string,
       presetBox?: DetectedBox | null
     ) => {
-      const autoCrop: CropBox = presetBox
+      const localCrop: CropBox = presetBox
         ? {
             top: Math.min(0.35, Math.max(0, Number(presetBox.y.toFixed(3)))),
             left: Math.min(0.35, Math.max(0, Number(presetBox.x.toFixed(3)))),
@@ -1765,14 +1922,57 @@ export default function App() {
           }
         : await autoDetectCropBoxFromUrl(rawUrl);
 
-      const defaultFilter: ScanFilter =
+      let chosenCrop: CropBox = localCrop;
+      let chosenFilter: ScanFilter =
         scanCategory === 'Doc' || scanCategory === 'Receipt' ? 'crisp' : 'original';
+      let chosenLabel = label;
+      let usedAi = false;
+      let aiDocTitle: string | undefined;
+
+      if (aiScanEnabled) {
+        try {
+          const aiRes = await requestAiDetectAndCrop(rawUrl, scanCategory);
+          const clampCrop = (v: unknown) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.min(0.42, Math.max(0, n)) : 0;
+          };
+          const aiCrop: CropBox = {
+            left: clampCrop(aiRes.left),
+            top: clampCrop(aiRes.top),
+            right: clampCrop(aiRes.right),
+            bottom: clampCrop(aiRes.bottom),
+          };
+          if (
+            aiCrop.left + aiCrop.right < 0.78 &&
+            aiCrop.top + aiCrop.bottom < 0.78
+          ) {
+            chosenCrop = aiCrop;
+            usedAi = true;
+          }
+          if (
+            aiRes.recommendedFilter === 'original' ||
+            aiRes.recommendedFilter === 'crisp' ||
+            aiRes.recommendedFilter === 'grayscale' ||
+            aiRes.recommendedFilter === 'bw'
+          ) {
+            chosenFilter = aiRes.recommendedFilter;
+          }
+          if (aiRes.pageHeading?.trim()) {
+            chosenLabel = aiRes.pageHeading.trim();
+          }
+          if (aiRes.documentTitle?.trim()) {
+            aiDocTitle = aiRes.documentTitle.trim();
+          }
+        } catch {
+          // Graceful fallback to local autoDetectCropBoxFromUrl
+        }
+      }
 
       const rendered = await renderProcessedPage(
         rawUrl,
-        autoCrop,
+        chosenCrop,
         0,
-        defaultFilter,
+        chosenFilter,
         104,
         112
       );
@@ -1785,13 +1985,13 @@ export default function App() {
         width: rendered.width,
         height: rendered.height,
         rotation: 0,
-        crop: autoCrop,
-        filter: defaultFilter,
+        crop: chosenCrop,
+        filter: chosenFilter,
         brightness: 104,
         contrast: 112,
         category: scanCategory,
         source,
-        label,
+        label: chosenLabel,
       };
 
       setPages((prev) => {
@@ -1802,54 +2002,167 @@ export default function App() {
           {
             id: newId,
             pageNumber: next.length,
-            heading: `${scanCategory} Page ${next.length}`,
-            summary: `${label} · Auto-cropped`,
+            heading: chosenLabel || `${scanCategory} Page ${next.length}`,
+            summary: `${label} · ${usedAi ? 'AI Auto-Cropped' : 'Auto-cropped'}`,
           },
         ]);
+        if (aiDocTitle && prev.length === 0) {
+          setDocumentTitle(aiDocTitle);
+          setFilename(
+            aiDocTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
+              'ShMp3100_Document'
+          );
+        }
         return next;
       });
     },
-    [scanCategory]
+    [scanCategory, aiScanEnabled]
   );
 
-  const handleScanCapture = useCallback(async () => {
-    const video = videoRef.current;
-    if (!video || cameraState !== 'active' || isCapturing) return;
+  const handleScanCapture = useCallback(
+    async (forceAi = false) => {
+      const video = videoRef.current;
+      if (!video || cameraState !== 'active' || isCapturing) return;
 
-    setIsCapturing(true);
-    setLockProgress(0);
-    try {
-      const w = video.videoWidth || 1280;
-      const h = video.videoHeight || 960;
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(video, 0, 0, w, h);
-      const rawUrl = canvas.toDataURL('image/jpeg', 0.94);
+      setIsCapturing(true);
+      setLockProgress(0);
+      const useAi = forceAi || aiScanEnabled;
+      if (useAi) setIsAiProcessing(true);
 
-      await addRawImageAsScannedPage(
-        rawUrl,
-        'camera',
-        `${scanCategory}_Scan_${pages.length + 1}`,
-        detectedBox
-      );
-      notify('success', `Captured & auto-cropped page ${pages.length + 1}!`);
-    } catch {
-      notify('error', 'Failed to capture scanned page.');
-    } finally {
-      setIsCapturing(false);
-    }
-  }, [
-    cameraState,
-    isCapturing,
-    addRawImageAsScannedPage,
-    scanCategory,
-    pages.length,
-    detectedBox,
-    notify,
-  ]);
+      try {
+        const w = video.videoWidth || 1920;
+        const h = video.videoHeight || 1440;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, w, h);
+        const rawUrl = canvas.toDataURL('image/jpeg', 0.94);
+
+        if (useAi) {
+          try {
+            const aiRes = await requestAiDetectAndCrop(rawUrl, scanCategory);
+            const clampCrop = (v: unknown) => {
+              const n = Number(v);
+              return Number.isFinite(n) ? Math.min(0.42, Math.max(0, n)) : 0;
+            };
+            const aiCrop: CropBox = {
+              left: clampCrop(aiRes.left),
+              top: clampCrop(aiRes.top),
+              right: clampCrop(aiRes.right),
+              bottom: clampCrop(aiRes.bottom),
+            };
+            const validCrop =
+              aiCrop.left + aiCrop.right < 0.78 && aiCrop.top + aiCrop.bottom < 0.78
+                ? aiCrop
+                : await autoDetectCropBoxFromUrl(rawUrl);
+
+            const aiFilter: ScanFilter =
+              aiRes.recommendedFilter === 'original' ||
+              aiRes.recommendedFilter === 'crisp' ||
+              aiRes.recommendedFilter === 'grayscale' ||
+              aiRes.recommendedFilter === 'bw'
+                ? aiRes.recommendedFilter
+                : scanCategory === 'Doc' || scanCategory === 'Receipt'
+                  ? 'crisp'
+                  : 'original';
+
+            const rendered = await renderProcessedPage(
+              rawUrl,
+              validCrop,
+              0,
+              aiFilter,
+              104,
+              114
+            );
+            const pageLabel =
+              aiRes.pageHeading?.trim() || `${scanCategory}_AI_Scan_${pages.length + 1}`;
+            const newId = `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const newPage: ScannedPage = {
+              id: newId,
+              rawUrl,
+              processedUrl: rendered.dataUrl,
+              width: rendered.width,
+              height: rendered.height,
+              rotation: 0,
+              crop: validCrop,
+              filter: aiFilter,
+              brightness: 104,
+              contrast: 114,
+              category: scanCategory,
+              source: 'camera',
+              label: pageLabel,
+            };
+            setPages((prev) => {
+              const next = [...prev, newPage];
+              setSelectedPageIdx(next.length - 1);
+              setIndexEntries((prevIdx) => [
+                ...prevIdx,
+                {
+                  id: newId,
+                  pageNumber: next.length,
+                  heading: pageLabel,
+                  summary: `AI Auto-Cropped · Focus: ${aiRes.focusQuality || 'sharp'}`,
+                },
+              ]);
+              return next;
+            });
+            if (aiRes.documentTitle?.trim() && pages.length === 0) {
+              const cleanTitle = aiRes.documentTitle.trim();
+              setDocumentTitle(cleanTitle);
+              setFilename(
+                cleanTitle.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
+                  'ShMp3100_Document'
+              );
+            }
+            notify(
+              'success',
+              `AI captured & auto-cropped page ${pages.length + 1} (${aiRes.focusQuality || 'sharp'} focus)!`
+            );
+            return;
+          } catch (aiErr) {
+            const msg =
+              aiErr instanceof Error ? aiErr.message : 'AI crop unavailable';
+            await addRawImageAsScannedPage(
+              rawUrl,
+              'camera',
+              `${scanCategory}_Scan_${pages.length + 1}`,
+              detectedBox
+            );
+            notify(
+              'error',
+              `${msg} Saved page ${pages.length + 1} using local auto-crop.`
+            );
+            return;
+          }
+        }
+
+        await addRawImageAsScannedPage(
+          rawUrl,
+          'camera',
+          `${scanCategory}_Scan_${pages.length + 1}`,
+          detectedBox
+        );
+        notify('success', `Captured & auto-cropped page ${pages.length + 1}!`);
+      } catch {
+        notify('error', 'Failed to capture scanned page.');
+      } finally {
+        setIsAiProcessing(false);
+        setIsCapturing(false);
+      }
+    },
+    [
+      cameraState,
+      isCapturing,
+      aiScanEnabled,
+      addRawImageAsScannedPage,
+      scanCategory,
+      pages.length,
+      detectedBox,
+      notify,
+    ]
+  );
 
   useEffect(() => {
     if (
@@ -1868,33 +2181,38 @@ export default function App() {
       const list = Array.from(rawFiles);
       let addedCount = 0;
       let skipped = 0;
+      if (aiScanEnabled) setIsAiProcessing(true);
 
-      for (const file of list) {
-        const ext = file.name.split('.').pop()?.toLowerCase() || '';
-        const ok =
-          ACCEPTED_IMAGE_MIME.has(file.type.toLowerCase()) ||
-          ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
-        if (!ok) {
-          skipped++;
-          continue;
+      try {
+        for (const file of list) {
+          const ext = file.name.split('.').pop()?.toLowerCase() || '';
+          const ok =
+            ACCEPTED_IMAGE_MIME.has(file.type.toLowerCase()) ||
+            ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
+          if (!ok) {
+            skipped++;
+            continue;
+          }
+          try {
+            const rawUrl = URL.createObjectURL(file);
+            await addRawImageAsScannedPage(
+              rawUrl,
+              'gallery',
+              file.name.replace(/\.[^.]+$/, '')
+            );
+            addedCount++;
+          } catch {
+            skipped++;
+          }
         }
-        try {
-          const rawUrl = URL.createObjectURL(file);
-          await addRawImageAsScannedPage(
-            rawUrl,
-            'gallery',
-            file.name.replace(/\.[^.]+$/, '')
-          );
-          addedCount++;
-        } catch {
-          skipped++;
-        }
+      } finally {
+        setIsAiProcessing(false);
       }
 
       if (addedCount > 0) {
         notify(
           'success',
-          `Added & auto-cropped ${addedCount} ${addedCount === 1 ? 'document image' : 'document images'}.`
+          `${aiScanEnabled ? 'AI auto-cropped' : 'Added & auto-cropped'} ${addedCount} ${addedCount === 1 ? 'document image' : 'document images'}.`
         );
         if (openStudioEdit) {
           setScanStudioActive(true);
@@ -1908,7 +2226,7 @@ export default function App() {
         );
       }
     },
-    [addRawImageAsScannedPage, notify]
+    [addRawImageAsScannedPage, aiScanEnabled, notify]
   );
 
   // ==========================================================================
@@ -2808,11 +3126,12 @@ export default function App() {
             </div>
           </header>
 
-          {/* SCAN VIEWFINDER */}
+          {/* SCAN VIEWFINDER (BIG SCREEN + AI CAPTURE + AUTO-FOCUS + AUTO-CROP) */}
           {scanStep === 'scan' && (
-            <main className="relative z-20 mx-auto flex w-full max-w-[1040px] flex-1 flex-col items-center justify-between gap-4 px-4 py-4 sm:px-6">
-              <div className="relative flex w-full max-w-[780px] flex-1 items-center justify-center gap-3 sm:gap-5">
+            <main className="relative z-20 mx-auto flex w-full max-w-[1440px] flex-1 flex-col items-center justify-between gap-4 px-3 py-3 sm:px-6 sm:py-4">
+              <div className="relative flex w-full max-w-[1320px] flex-1 flex-col items-center justify-center gap-3 sm:flex-row sm:gap-5">
                 <div
+                  onClick={handleTapToFocus}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => {
                     e.preventDefault();
@@ -2820,7 +3139,7 @@ export default function App() {
                       handleImageFilesChosen(e.dataTransfer.files, true);
                     }
                   }}
-                  className="relative flex aspect-[3/4] max-h-[540px] w-full max-w-[430px] items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-[#0A0506] shadow-[0_24px_80px_rgba(0,0,0,0.85)]"
+                  className="relative flex h-[64vh] min-h-[470px] max-h-[820px] w-full flex-1 items-center justify-center overflow-hidden rounded-3xl border border-white/15 bg-[#0A0506] shadow-[0_24px_80px_rgba(0,0,0,0.85)] cursor-crosshair"
                 >
                   <video
                     ref={videoRef}
@@ -2831,37 +3150,64 @@ export default function App() {
                     }`}
                   />
 
-                  <div className="pointer-events-none absolute inset-x-0 top-5 z-20 flex flex-col items-center px-6 text-center">
-                    <p className="rounded-full bg-black/55 px-3.5 py-1 text-xs font-semibold text-white/90 backdrop-blur-md">
-                      {detectedBox
-                        ? autoCapture
-                          ? `Document detected · Auto-capture ${lockProgress}%`
-                          : 'Document detected · Auto-crop ready'
-                        : 'Align document within the frame'}
+                  {/* Top Live Detection & Page Focus HUD */}
+                  <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex flex-wrap items-center justify-center gap-2 px-4 text-center">
+                    <p className="rounded-full border border-white/15 bg-black/65 px-3.5 py-1.5 text-xs font-semibold text-white/95 backdrop-blur-md">
+                      {isAiProcessing
+                        ? 'AI Detecting Page Edges & Auto-Cropping...'
+                        : detectedBox
+                          ? autoCapture
+                            ? `Page Detected · Auto-Capture ${lockProgress}%`
+                            : 'Page Edges Locked · Ready to Auto-Crop'
+                          : 'Point camera at document page · Tap anywhere to focus'}
                     </p>
+                    {cameraState === 'active' && (
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 font-mono-tabular text-[11px] font-bold backdrop-blur-md ${
+                          focusScore >= 55
+                            ? 'border-emerald-400/50 bg-emerald-950/70 text-emerald-300'
+                            : focusScore >= 34
+                              ? 'border-amber-400/50 bg-amber-950/70 text-amber-200'
+                              : 'border-white/15 bg-black/65 text-white/75'
+                        }`}
+                      >
+                        <Focus className="h-3.5 w-3.5" />
+                        <span>
+                          Focus: {focusScore}%{' '}
+                          {focusScore >= 55 ? 'Sharp' : focusScore >= 34 ? 'Good' : 'Adjust'}
+                        </span>
+                      </span>
+                    )}
+                    {aiScanEnabled && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-cyan-400/45 bg-cyan-950/70 px-3 py-1.5 text-[11px] font-bold text-cyan-200 backdrop-blur-md">
+                        <Wand2 className="h-3 w-3" />
+                        <span>AI Auto-Crop ON</span>
+                      </span>
+                    )}
                   </div>
 
+                  {/* Auto-Detected Document Edge Overlay */}
                   <div
                     aria-hidden="true"
                     className="pointer-events-none absolute z-10 transition-all duration-200"
                     style={{
                       left: detectedBox ? `${detectedBox.x * 100}%` : '7%',
-                      top: detectedBox ? `${detectedBox.y * 100}%` : '7%',
+                      top: detectedBox ? `${detectedBox.y * 100}%` : '8%',
                       width: detectedBox ? `${detectedBox.w * 100}%` : '86%',
-                      height: detectedBox ? `${detectedBox.h * 100}%` : '86%',
+                      height: detectedBox ? `${detectedBox.h * 100}%` : '84%',
                     }}
                   >
                     <span
-                      className={`absolute left-0 top-0 h-8 w-8 rounded-tl-xl border-l-[3.5px] border-t-[3.5px] ${accentBorderColor}`}
+                      className={`absolute left-0 top-0 h-10 w-10 rounded-tl-xl border-l-[4px] border-t-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute right-0 top-0 h-8 w-8 rounded-tr-xl border-r-[3.5px] border-t-[3.5px] ${accentBorderColor}`}
+                      className={`absolute right-0 top-0 h-10 w-10 rounded-tr-xl border-r-[4px] border-t-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute bottom-0 left-0 h-8 w-8 rounded-bl-xl border-b-[3.5px] border-l-[3.5px] ${accentBorderColor}`}
+                      className={`absolute bottom-0 left-0 h-10 w-10 rounded-bl-xl border-b-[4px] border-l-[4px] ${accentBorderColor}`}
                     />
                     <span
-                      className={`absolute bottom-0 right-0 h-8 w-8 rounded-br-xl border-b-[3.5px] border-r-[3.5px] ${accentBorderColor}`}
+                      className={`absolute bottom-0 right-0 h-10 w-10 rounded-br-xl border-b-[4px] border-r-[4px] ${accentBorderColor}`}
                     />
                     <div
                       className={`animate-scan-sweep absolute inset-x-2 h-[3px] rounded-full ${
@@ -2872,33 +3218,63 @@ export default function App() {
                     />
                   </div>
 
+                  {/* Tap-to-Focus Reticle */}
+                  {focusReticle && (
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        left: `${focusReticle.x * 100}%`,
+                        top: `${focusReticle.y * 100}%`,
+                      }}
+                      className={`pointer-events-none absolute z-20 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 p-4 transition-all duration-300 ${
+                        focusReticle.locking
+                          ? 'scale-110 border-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.75)]'
+                          : 'scale-95 border-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.7)]'
+                      }`}
+                    >
+                      <Crosshair className="h-5 w-5 text-white" />
+                    </div>
+                  )}
+
                   {cameraState === 'idle' && (
-                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/60 text-xs text-white/75">
-                      <RefreshCw className="h-5 w-5 animate-spin text-red-400" />
-                      <span>Starting auto-detection camera...</span>
+                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/65 text-sm text-white/80">
+                      <RefreshCw className="h-6 w-6 animate-spin text-red-400" />
+                      <span>Starting HD auto-focus &amp; edge detection camera...</span>
                     </div>
                   )}
 
                   {cameraState === 'error' && (
-                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[#100708]/95 p-6 text-center">
-                      <Camera className="h-9 w-9 text-red-400" />
-                      <p className="max-w-xs text-xs leading-relaxed text-white/80">
-                        {cameraError}
-                      </p>
-                      <div className="flex flex-wrap justify-center gap-2">
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-[#100708]/95 p-8 text-center cursor-default"
+                    >
+                      <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-red-500/35 bg-red-500/15">
+                        <Camera className="h-8 w-8 text-red-400" />
+                      </div>
+                      <div className="max-w-md space-y-1.5">
+                        <h2 className="font-display text-lg font-bold text-white">
+                          Scan Document Viewfinder Ready
+                        </h2>
+                        <p className="text-xs leading-relaxed text-white/75 sm:text-sm">
+                          {cameraError}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap justify-center gap-3">
                         <button
                           type="button"
                           onClick={() => startCamera(facingMode)}
-                          className="rounded-xl border border-white/15 bg-white/10 px-3.5 py-2 text-xs font-bold text-white hover:bg-white/20 cursor-pointer"
+                          className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-xs font-bold text-white hover:bg-white/20 cursor-pointer"
                         >
-                          Retry Camera
+                          <RefreshCw className="h-4 w-4" />
+                          <span>Retry Camera</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => galleryInputRef.current?.click()}
-                          className="rounded-xl bg-[#DC2626] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#B91C1C] cursor-pointer"
+                          className="inline-flex items-center gap-2 rounded-xl bg-[#DC2626] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#B91C1C] cursor-pointer"
                         >
-                          Choose File (Gallery)
+                          <Upload className="h-4 w-4" />
+                          <span>Choose Document Image &amp; Auto-Crop</span>
                         </button>
                       </div>
                     </div>
@@ -2906,7 +3282,7 @@ export default function App() {
                 </div>
 
                 {/* Right Vertical Mode Rail */}
-                <div className="flex flex-col gap-3 rounded-2xl border border-white/12 bg-[#1B0D10]/85 p-2 shadow-xl backdrop-blur-xl">
+                <div className="flex flex-row gap-2 overflow-x-auto rounded-2xl border border-white/12 bg-[#1B0D10]/85 p-2 shadow-xl backdrop-blur-xl sm:flex-col sm:gap-3">
                   {SCAN_CATEGORIES.map((cat) => {
                     const Icon = cat.icon;
                     const active = scanCategory === cat.id;
@@ -2941,9 +3317,9 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Bottom Control Dock */}
-              <div className="w-full max-w-[540px] space-y-2 pb-2">
-                <div className="relative flex items-center justify-between rounded-3xl border border-white/12 bg-[#1A0D0F]/90 px-6 py-3.5 shadow-2xl backdrop-blur-xl">
+              {/* Bottom Control Dock (Gallery · Auto-Focus · Merged AI SCAN [AI Crop + Auto-Cap] · Flash) */}
+              <div className="w-full max-w-[760px] space-y-2 pb-1">
+                <div className="relative flex items-center justify-between gap-2 rounded-3xl border border-white/12 bg-[#1A0D0F]/90 px-5 py-3 shadow-2xl backdrop-blur-xl sm:px-8">
                   <button
                     type="button"
                     onClick={() => galleryInputRef.current?.click()}
@@ -2952,30 +3328,84 @@ export default function App() {
                     <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5">
                       <ImageIcon className="h-5 w-5" />
                     </span>
-                    <span className="text-xs font-semibold">Gallery</span>
+                    <span className="text-[11px] font-semibold">Gallery</span>
                   </button>
 
                   <button
                     type="button"
-                    onClick={handleScanCapture}
-                    disabled={cameraState !== 'active' || isCapturing}
-                    className="relative -my-6 flex h-24 w-24 items-center justify-center rounded-full p-[3px] transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
+                    onClick={() => setAutoFocusEnabled((v) => !v)}
+                    className={`flex flex-col items-center gap-1 transition-colors cursor-pointer ${
+                      autoFocusEnabled
+                        ? 'text-emerald-300'
+                        : 'text-white/75 hover:text-white'
+                    }`}
                   >
                     <span
-                      aria-hidden="true"
-                      className={`absolute inset-0 rounded-full ${
-                        isRgbActive
-                          ? 'rgb-spectrum-glow shadow-[0_0_28px_rgba(34,211,238,0.65)]'
-                          : 'bg-gradient-to-b from-[#FF5252] to-[#B91C1C] shadow-[0_0_32px_rgba(239,68,68,0.85)]'
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl border ${
+                        autoFocusEnabled
+                          ? 'border-emerald-400/50 bg-emerald-500/20'
+                          : 'border-white/10 bg-white/5'
                       }`}
-                    />
-                    <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#1C0B0D] text-white">
-                      <ScanLine className="h-6 w-6" />
-                      <span className="font-display mt-0.5 text-xs font-extrabold tracking-wider">
-                        {isCapturing ? '...' : 'SCAN'}
-                      </span>
+                    >
+                      <Focus className="h-5 w-5" />
+                    </span>
+                    <span className="text-[11px] font-semibold">
+                      {autoFocusEnabled ? 'Auto-Focus' : 'Manual'}
                     </span>
                   </button>
+
+                  {/* Merged AI SCAN Control (AI Scan + AI Crop + Auto-Capture fitted together) */}
+                  <div className="relative -my-5 flex flex-col items-center">
+                    <button
+                      type="button"
+                      onClick={() => handleScanCapture(true)}
+                      disabled={cameraState !== 'active' || isCapturing}
+                      className="relative flex h-24 w-24 items-center justify-center rounded-full p-[3px] transition-transform active:scale-95 disabled:opacity-50 cursor-pointer"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`absolute inset-0 rounded-full ${
+                          isRgbActive || aiScanEnabled || autoCapture
+                            ? 'rgb-spectrum-glow shadow-[0_0_28px_rgba(34,211,238,0.65)]'
+                            : 'bg-gradient-to-b from-[#FF5252] to-[#B91C1C] shadow-[0_0_32px_rgba(239,68,68,0.85)]'
+                        }`}
+                      />
+                      <span className="relative flex h-full w-full flex-col items-center justify-center rounded-full bg-[#1C0B0D] text-white">
+                        {isAiProcessing ? (
+                          <RefreshCw className="h-6 w-6 animate-spin text-cyan-300" />
+                        ) : (
+                          <Wand2 className="h-6 w-6 text-cyan-300" />
+                        )}
+                        <span className="font-display mt-0.5 text-[11px] font-extrabold tracking-wider">
+                          {isCapturing ? 'AI...' : 'AI SCAN'}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = !(aiScanEnabled && autoCapture);
+                        setAiScanEnabled(next || true);
+                        setAutoCapture(next);
+                        notify(
+                          'success',
+                          next
+                            ? 'AI Scan merged mode: AI Crop + Auto-Capture ON!'
+                            : 'AI Auto-Capture paused (AI Crop stays ON on tap).'
+                        );
+                      }}
+                      className={`relative z-10 -mt-3 inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold shadow-md transition-colors cursor-pointer ${
+                        autoCapture
+                          ? 'border-cyan-300 bg-cyan-500 text-slate-950'
+                          : 'border-white/25 bg-[#1C0B0D] text-cyan-200 hover:bg-white/15'
+                      }`}
+                    >
+                      <Sparkles className="h-2.5 w-2.5" />
+                      <span>
+                        {autoCapture ? 'AI Crop + Auto ON' : 'AI Crop · Tap Auto'}
+                      </span>
+                    </button>
+                  </div>
 
                   <button
                     type="button"
@@ -2991,15 +3421,18 @@ export default function App() {
                     >
                       <Zap className="h-5 w-5" />
                     </span>
-                    <span className="text-xs font-semibold">
+                    <span className="text-[11px] font-semibold">
                       {flashOn ? 'Flash On' : 'Flash'}
                     </span>
                   </button>
                 </div>
 
-                <p className="text-center text-[11px] text-white/50">
-                  Tap SCAN for auto-detect &amp; auto-crop · Mode:{' '}
-                  <span className="font-semibold text-white/80">{scanCategory}</span> ·{' '}
+                <p className="text-center text-[11px] text-white/60">
+                  AI Scanner (AI Crop + Auto-Cap):{' '}
+                  <span className="font-semibold text-cyan-300">
+                    {autoCapture ? 'Auto + AI Crop ON' : 'AI Crop ON'}
+                  </span>{' '}
+                  · Mode: <span className="font-semibold text-white/85">{scanCategory}</span> ·{' '}
                   {pages.length} page(s) captured
                 </p>
               </div>
@@ -3131,7 +3564,62 @@ export default function App() {
                         <h3 className="text-sm font-bold text-white">
                           Automatic &amp; Fine Edge Crop
                         </h3>
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            disabled={isAiProcessing}
+                            onClick={async () => {
+                              setIsAiProcessing(true);
+                              try {
+                                const aiRes = await requestAiDetectAndCrop(
+                                  activePage.rawUrl,
+                                  activePage.category
+                                );
+                                const clampCrop = (v: unknown) => {
+                                  const n = Number(v);
+                                  return Number.isFinite(n)
+                                    ? Math.min(0.42, Math.max(0, n))
+                                    : 0;
+                                };
+                                const nextCrop: CropBox = {
+                                  left: clampCrop(aiRes.left),
+                                  top: clampCrop(aiRes.top),
+                                  right: clampCrop(aiRes.right),
+                                  bottom: clampCrop(aiRes.bottom),
+                                };
+                                if (
+                                  nextCrop.left + nextCrop.right < 0.78 &&
+                                  nextCrop.top + nextCrop.bottom < 0.78
+                                ) {
+                                  await updateActivePage({ crop: nextCrop });
+                                  notify('success', 'AI detected page edges & auto-cropped!');
+                                } else {
+                                  const box = await autoDetectCropBoxFromUrl(
+                                    activePage.rawUrl
+                                  );
+                                  await updateActivePage({ crop: box });
+                                  notify('success', 'Auto-cropped page bounds!');
+                                }
+                              } catch (err) {
+                                const box = await autoDetectCropBoxFromUrl(
+                                  activePage.rawUrl
+                                );
+                                await updateActivePage({ crop: box });
+                                notify(
+                                  'error',
+                                  err instanceof Error
+                                    ? `${err.message} Applied local auto-crop instead.`
+                                    : 'Applied local auto-crop.'
+                                );
+                              } finally {
+                                setIsAiProcessing(false);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-cyan-500 to-violet-600 px-3 py-1.5 text-xs font-bold text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                          >
+                            <Wand2 className="h-3.5 w-3.5" />
+                            <span>{isAiProcessing ? 'AI Cropping...' : 'AI Auto-Crop'}</span>
+                          </button>
                           <button
                             type="button"
                             onClick={async () => {
@@ -4155,16 +4643,37 @@ export default function App() {
                     Choose Document / Image Files
                   </h2>
                   <p className="mt-1 text-xs font-medium text-slate-800">
-                    Drag &amp; drop JPG, JPEG, PNG, GIF, BMP, or WEBP — auto-cropped automatically on upload
+                    Drag &amp; drop JPG, JPEG, PNG, GIF, BMP, or WEBP — AI auto-cropped automatically on upload
                   </p>
                   <div className="mt-4 flex flex-wrap justify-center gap-3">
                     <button
                       type="button"
+                      disabled={isAiProcessing}
                       onClick={() => galleryInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-xl bg-[#6D28D9] px-5 py-2.5 text-xs font-bold text-white hover:bg-[#5B21B6] cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-xl bg-[#6D28D9] px-5 py-2.5 text-xs font-bold text-white hover:bg-[#5B21B6] disabled:opacity-60 cursor-pointer"
                     >
-                      <FileImage className="h-4 w-4" />
-                      <span>Choose File(s)</span>
+                      {isAiProcessing ? (
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <FileImage className="h-4 w-4" />
+                      )}
+                      <span>
+                        {isAiProcessing ? 'AI Auto-Cropping...' : 'Choose File(s)'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAiScanEnabled((v) => !v)}
+                      className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs font-bold cursor-pointer ${
+                        aiScanEnabled
+                          ? 'border-cyan-500/50 bg-cyan-50 text-cyan-800 hover:bg-cyan-100'
+                          : 'border-slate-300 bg-white/80 text-slate-700 hover:bg-white'
+                      }`}
+                    >
+                      <Wand2 className="h-4 w-4" />
+                      <span>
+                        AI Document Crop: {aiScanEnabled ? 'ON (Default)' : 'OFF'}
+                      </span>
                     </button>
                     <button
                       type="button"

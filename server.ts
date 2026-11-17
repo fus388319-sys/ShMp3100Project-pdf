@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -106,6 +106,105 @@ async function startServer() {
       console.error('Analyze document error:', err);
       return res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to analyze scanned pages.',
+      });
+    }
+  });
+
+  app.post('/api/ai-detect-crop', async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          error: 'AI document capture is unavailable (API key not configured in Secrets).',
+        });
+      }
+
+      const body = req.body as {
+        imageBase64?: string;
+        mimeType?: string;
+        scanMode?: string;
+      };
+
+      const imageBase64 = typeof body?.imageBase64 === 'string' ? body.imageBase64.trim() : '';
+      if (!imageBase64) {
+        return res.status(400).json({ error: 'Captured page image data is required.' });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const scanModeLabel = typeof body?.scanMode === 'string' ? body.scanMode : 'Doc';
+
+      const promptText =
+        `Inspect this captured camera frame in "${scanModeLabel}" scan mode. ` +
+        `Locate the outer four edges of the physical document/book/page/receipt/ID card inside the frame. ` +
+        `Return normalized inset crop fractions (0.0 to 0.42) from each edge of the image (left, top, right, bottom) to tightly crop out background desk/table and keep only the clean page. ` +
+        `Also assess focusQuality ("sharp", "moderate", or "blurry"), whether a document is clearly present (documentDetected), a short pageHeading, documentTitle, and recommendedFilter ("original", "crisp", "grayscale", or "bw").`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: body?.mimeType || 'image/jpeg',
+                data: imageBase64,
+              },
+            },
+            { text: promptText },
+          ],
+        },
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              documentDetected: { type: Type.BOOLEAN },
+              focusQuality: {
+                type: Type.STRING,
+                description: 'One of: sharp, moderate, blurry',
+              },
+              left: {
+                type: Type.NUMBER,
+                description: 'Fraction of image width to trim from the left edge (0 to 0.42)',
+              },
+              top: {
+                type: Type.NUMBER,
+                description: 'Fraction of image height to trim from the top edge (0 to 0.42)',
+              },
+              right: {
+                type: Type.NUMBER,
+                description: 'Fraction of image width to trim from the right edge (0 to 0.42)',
+              },
+              bottom: {
+                type: Type.NUMBER,
+                description: 'Fraction of image height to trim from the bottom edge (0 to 0.42)',
+              },
+              documentTitle: { type: Type.STRING },
+              pageHeading: { type: Type.STRING },
+              recommendedFilter: {
+                type: Type.STRING,
+                description: 'One of: original, crisp, grayscale, bw',
+              },
+            },
+          },
+        },
+      });
+
+      const rawText = (response.text ?? '{}').trim();
+      const parsed = JSON.parse(rawText);
+      return res.json(parsed);
+    } catch (err) {
+      console.error('AI detect-crop error:', err);
+      return res.status(500).json({
+        error: err instanceof Error ? err.message : 'AI page detection failed.',
       });
     }
   });
